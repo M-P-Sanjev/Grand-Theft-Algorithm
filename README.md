@@ -93,11 +93,6 @@ Safra is a **support tool**, not rescue or legal/medical advice. Prefer human he
 
 ---
 
-## Commit convention
-
-All pushes to this repo use the commit comment **`Chris`**.
-
----
 
 ## Team
 
