@@ -4,7 +4,7 @@ import { FormEvent, useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import Link from 'next/link'
 import { API_BASE, SITE } from '@/lib/constants'
-import { AgentChat } from '@/components/agents/AgentChat'
+import { AiChatPanel } from '@/components/agents/AiChatPanel'
 
 type SecureMsg = {
   id?: string
@@ -71,7 +71,7 @@ export default function SecureChannelPage() {
       <div className="mx-auto max-w-2xl px-6 py-12">
         <p className="font-display text-2xl tracking-[0.14em] text-gold">{SITE.name}</p>
         <h1 className="font-display mt-4 text-4xl">Secure channel</h1>
-        <p className="mt-2 text-sm text-soft/75">Private messages for your support order.</p>
+        <p className="mt-2 text-sm text-soft/75">Private messages for your support case.</p>
 
         {loading && <p className="mt-8 text-soft">Opening…</p>}
         {error && <p className="mt-8 text-amber-300">{error}</p>}
@@ -130,14 +130,14 @@ export default function SecureChannelPage() {
             </form>
 
             {caseId && (
-              <div className="grid gap-4 md:grid-cols-2">
-                <AgentChat caseId={caseId} kind="legal" auth={{ token }} />
-                <AgentChat caseId={caseId} kind="therapy" auth={{ token }} />
+              <div className="grid gap-4 lg:grid-cols-2">
+                <AiChatPanel caseId={caseId} kind="legal" auth={{ token }} />
+                <AiChatPanel caseId={caseId} kind="therapy" auth={{ token }} />
               </div>
             )}
 
             <Link href="/" className="inline-block text-[10px] tracking-[0.2em] text-muted uppercase">
-              Back to menu
+              Back to safety
             </Link>
           </div>
         )}

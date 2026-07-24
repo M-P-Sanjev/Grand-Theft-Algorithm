@@ -1,7 +1,7 @@
 export const SITE = {
   name: 'Safra',
-  tagline: 'Order food. Delivered fast.',
-  subheading: 'Browse the menu, add to cart, and checkout in minutes.',
+  tagline: 'A curated kitchen. Delivered.',
+  subheading: 'Twenty-two signature dishes — chosen with intention.',
 } as const
 
 export const NAV = [
@@ -9,151 +9,23 @@ export const NAV = [
   { label: 'Cart', href: '#order' },
 ] as const
 
+/** Premium category chips — curated, not endless. */
 export const CATEGORIES = [
+  { id: 'burgers', label: 'Burgers', emoji: '🍔' },
   { id: 'pizza', label: 'Pizza', emoji: '🍕' },
-  { id: 'burger', label: 'Burger', emoji: '🍔' },
-  { id: 'chicken', label: 'Chicken', emoji: '🍗' },
-  { id: 'ramen', label: 'Ramen', emoji: '🍜' },
-  { id: 'sushi', label: 'Sushi', emoji: '🍣' },
-  { id: 'steak', label: 'Steak', emoji: '🥩' },
-  { id: 'mexican', label: 'Mexican', emoji: '🌮' },
-  { id: 'chinese', label: 'Chinese', emoji: '🥟' },
-  { id: 'italian', label: 'Italian', emoji: '🍝' },
-  { id: 'indian', label: 'Indian', emoji: '🥘' },
-  { id: 'middle-eastern', label: 'Middle Eastern', emoji: '🥙' },
+  { id: 'pasta', label: 'Pasta', emoji: '🍝' },
+  { id: 'asian', label: 'Asian', emoji: '🍜' },
   { id: 'healthy', label: 'Healthy', emoji: '🥗' },
-  { id: 'sandwiches', label: 'Sandwiches', emoji: '🥪' },
-  { id: 'wraps', label: 'Wraps', emoji: '🌯' },
-  { id: 'rice', label: 'Rice Bowls', emoji: '🍛' },
-  { id: 'snacks', label: 'Snacks', emoji: '🍟' },
-  { id: 'desserts', label: 'Desserts', emoji: '🍩' },
-  { id: 'cakes', label: 'Cakes', emoji: '🍰' },
-  { id: 'bubble-tea', label: 'Bubble Tea', emoji: '🧋' },
-  { id: 'coffee', label: 'Coffee', emoji: '☕' },
-  { id: 'mocktails', label: 'Mocktails', emoji: '🍹' },
-  { id: 'soft-drinks', label: 'Soft Drinks', emoji: '🥤' },
-  { id: 'beverages', label: 'Beverages', emoji: '🍺' },
+  { id: 'grills', label: 'Grills', emoji: '🥩' },
+  { id: 'desserts', label: 'Desserts', emoji: '🍰' },
+  { id: 'drinks', label: 'Drinks', emoji: '🥤' },
 ] as const
 
 type CatId = (typeof CATEGORIES)[number]['id']
 
-const IMAGES: Record<string, string[]> = {
-  pizza: [
-    'https://images.unsplash.com/photo-1513104890138-7c749659a591?auto=format&fit=crop&w=1600&q=90',
-    'https://images.unsplash.com/photo-1574071318508-1cdbab80d002?auto=format&fit=crop&w=1600&q=90',
-    'https://images.unsplash.com/photo-1565299624946-b28f40a0ae38?auto=format&fit=crop&w=1600&q=90',
-  ],
-  burger: [
-    'https://images.unsplash.com/photo-1568901346375-23c9450c58cd?auto=format&fit=crop&w=1600&q=90',
-    'https://images.unsplash.com/photo-1550547660-d9450f859349?auto=format&fit=crop&w=1600&q=90',
-    'https://images.unsplash.com/photo-1586190848861-99aa4a171e90?auto=format&fit=crop&w=1600&q=90',
-  ],
-  chicken: [
-    'https://images.unsplash.com/photo-1626082927389-6cd097cdc6ec?auto=format&fit=crop&w=1600&q=90',
-    'https://images.unsplash.com/photo-1598103442097-8b74394b95c6?auto=format&fit=crop&w=1600&q=90',
-  ],
-  ramen: [
-    'https://images.unsplash.com/photo-1569718212165-3a8278d5f624?auto=format&fit=crop&w=1600&q=90',
-    'https://images.unsplash.com/photo-1617093727343-374698b1b08d?auto=format&fit=crop&w=1600&q=90',
-  ],
-  sushi: [
-    'https://images.unsplash.com/photo-1579871494447-9811cf80d66c?auto=format&fit=crop&w=1600&q=90',
-    'https://images.unsplash.com/photo-1553621042-f6e147245754?auto=format&fit=crop&w=1600&q=90',
-  ],
-  steak: [
-    'https://images.unsplash.com/photo-1544025162-d76694265947?auto=format&fit=crop&w=1600&q=90',
-    'https://images.unsplash.com/photo-1600891964092-4316c288032e?auto=format&fit=crop&w=1600&q=90',
-  ],
-  mexican: [
-    'https://images.unsplash.com/photo-1565299585323-38d6b0865b47?auto=format&fit=crop&w=1600&q=90',
-    'https://images.unsplash.com/photo-1599974579688-8dbdd335c77f?auto=format&fit=crop&w=1600&q=90',
-  ],
-  chinese: [
-    'https://images.unsplash.com/photo-1525755662778-989d0524087e?auto=format&fit=crop&w=1600&q=90',
-    'https://images.unsplash.com/photo-1585032226651-759b368d7246?auto=format&fit=crop&w=1600&q=90',
-  ],
-  italian: [
-    'https://images.unsplash.com/photo-1621996346565-e3dbc646d9a9?auto=format&fit=crop&w=1600&q=90',
-    'https://images.unsplash.com/photo-1551183053-bf91a1d81141?auto=format&fit=crop&w=1600&q=90',
-  ],
-  indian: [
-    'https://images.unsplash.com/photo-1585937421612-70a008356fbe?auto=format&fit=crop&w=1600&q=90',
-    'https://images.unsplash.com/photo-1565557623262-b51c2513a641?auto=format&fit=crop&w=1600&q=90',
-  ],
-  'middle-eastern': [
-    'https://images.unsplash.com/photo-1529006557810-274b9b2fc783?auto=format&fit=crop&w=1600&q=90',
-  ],
-  healthy: [
-    'https://images.unsplash.com/photo-1512621776951-a57141f2eefd?auto=format&fit=crop&w=1600&q=90',
-    'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&w=1600&q=90',
-  ],
-  sandwiches: [
-    'https://images.unsplash.com/photo-1528735602780-2552fd46c7af?auto=format&fit=crop&w=1600&q=90',
-  ],
-  wraps: [
-    'https://images.unsplash.com/photo-1626700051175-6818013e1d4f?auto=format&fit=crop&w=1600&q=90',
-  ],
-  rice: [
-    'https://images.unsplash.com/photo-1603133872878-684f208fb84b?auto=format&fit=crop&w=1600&q=90',
-  ],
-  snacks: [
-    'https://images.unsplash.com/photo-1573080496219-bb080dd4f877?auto=format&fit=crop&w=1600&q=90',
-  ],
-  desserts: [
-    'https://images.unsplash.com/photo-1551024506-0bccd828d307?auto=format&fit=crop&w=1600&q=90',
-    'https://images.unsplash.com/photo-1488477181946-6428a0291777?auto=format&fit=crop&w=1600&q=90',
-  ],
-  cakes: [
-    'https://images.unsplash.com/photo-1578985545062-69928b1d9587?auto=format&fit=crop&w=1600&q=90',
-  ],
-  'bubble-tea': [
-    'https://images.unsplash.com/photo-1558857563-b371033873b8?auto=format&fit=crop&w=1600&q=90',
-  ],
-  coffee: [
-    'https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?auto=format&fit=crop&w=1600&q=90',
-    'https://images.unsplash.com/photo-1509042239860-f550ce710b93?auto=format&fit=crop&w=1600&q=90',
-  ],
-  mocktails: [
-    'https://images.unsplash.com/photo-1514362545857-3bc16c4c7d1b?auto=format&fit=crop&w=1600&q=90',
-  ],
-  'soft-drinks': [
-    'https://images.unsplash.com/photo-1622483767028-3f66f32aef97?auto=format&fit=crop&w=1600&q=90',
-  ],
-  beverages: [
-    'https://images.unsplash.com/photo-1608270586620-248524c67de9?auto=format&fit=crop&w=1600&q=90',
-  ],
-}
-
-const NAMES: Record<string, string[]> = {
-  pizza: ['Truffle Margherita', 'Fire Pepperoni', 'Bianca Cloud', 'Wild Mushroom', 'Smoked Burrata'],
-  burger: ['Safra Smash', 'Wagyu Crown', 'Midnight Stack', 'Crisp Garden', 'Gold Cheddar'],
-  chicken: ['Honey Char', 'Crisp Karaage', 'Smoke Wings', 'Herb Roast', 'Chili Glaze'],
-  ramen: ['Tonkotsu Night', 'Miso Ember', 'Spicy Shoyu', 'Black Garlic', 'Yuzu Cloud'],
-  sushi: ['Omakase Twelve', 'Dragon Roll', 'Sashimi Prism', 'Tempura Soft', 'Salmon Bloom'],
-  steak: ['Prime Ribeye', 'Butter Filet', 'Char Strip', 'Pepper Crust', 'Bone-In Night'],
-  mexican: ['Street Al Pastor', 'Fire Carnitas', 'Verde Bowl', 'Crisp Queso', 'Smoke Birria'],
-  chinese: ['Silk Dumplings', 'Wok Flame', 'Mapo Soft', 'Crisp Peking', 'Ginger Steam'],
-  italian: ['Carbonara Silk', 'Cacio e Pepe', 'Wild Pesto', 'Lobster Rigatoni', 'Truffle Tagli'],
-  indian: ['Butter Cloud', 'Tandoori Ember', 'Lamb Rogan', 'Paneer Smoke', 'Biryani Crown'],
-  'middle-eastern': ['Zaatar Wrap', 'Lamb Shawarma', 'Hummus Garden', 'Falafel Gold', 'Halloumi Fire'],
-  healthy: ['Green Prism', 'Quinoa Dawn', 'Avocado Lift', 'Kale Voltage', 'Citrus Bowl'],
-  sandwiches: ['Club Safra', 'Turkey Smoke', 'Caprese Soft', 'Cubano Heat', 'Egg Cloud'],
-  wraps: ['Chipotle Wrap', 'Greek Fold', 'Thai Crunch', 'Harvest Wrap', 'Spicy Tofu'],
-  rice: ['Teriyaki Bowl', 'Korean Fire', 'Poke Safra', 'Curry Lift', 'Sesame Bowl'],
-  snacks: ['Truffle Fries', 'Loaded Nachos', 'Crisp Rings', 'Tempura Bits', 'Cheese Puffs'],
-  desserts: ['Lava Core', 'Matcha Soft', 'Caramel Drift', 'Berry Glass', 'Choco Orbit'],
-  cakes: ['Velvet Slice', 'Lemon Cloud', 'Opera Night', 'Basque Burn', 'Tiramisu Soft'],
-  'bubble-tea': ['Brown Sugar', 'Taro Glow', 'Matcha Pearl', 'Lychee Ice', 'Sesame Milk'],
-  coffee: ['Flat White', 'Nitro Cold', 'Cortado Soft', 'Espresso Hit', 'Oat Latte'],
-  mocktails: ['Yuzu Spark', 'Berry Zero', 'Smoke Pine', 'Ginger Lift', 'Citrus Neon'],
-  'soft-drinks': ['Cola Zero', 'Citrus Fizz', 'Berry Pop', 'Ginger Ale', 'Spark Water'],
-  beverages: ['Craft Lager', 'Pale Safra', 'Wheat Soft', 'Dark Ember', 'Cider Light'],
-}
-
-function hash(n: number) {
-  const x = Math.sin(n * 12.9898) * 43758.5453
-  return x - Math.floor(x)
-}
+/** Shared crop so every card shares the same aspect / grade feel. */
+const img = (id: string) =>
+  `https://images.unsplash.com/${id}?auto=format&fit=crop&w=1200&h=1500&q=85`
 
 export type MenuItem = {
   id: string
@@ -162,71 +34,265 @@ export type MenuItem = {
   price: number
   rating: number
   time: number
-  calories: number
-  chefPick: boolean
   img: string
   desc: string
   secretEntry?: boolean
+  chefPick?: boolean
+  /** @deprecated kept optional for older cart state */
+  calories?: number
 }
 
-function buildMenu(): MenuItem[] {
-  const items: MenuItem[] = []
-  let i = 0
-  for (const cat of CATEGORIES) {
-    const names = NAMES[cat.id] ?? [`${cat.label} Select`]
-    const imgs = IMAGES[cat.id] ?? IMAGES.pizza
-    // 4–5 per category → ~100+
-    const count = 5
-    for (let n = 0; n < count; n++) {
-      const h = hash(i + 1)
-      const name = names[n % names.length] + (n >= names.length ? ` ${n + 1}` : '')
-      items.push({
-        id: `${cat.id}-${n}`,
-        name,
-        category: cat.id,
-        price: Math.round((8 + h * 28) * 100) / 100,
-        rating: Math.round((4.2 + h * 0.8) * 10) / 10,
-        time: 12 + Math.floor(h * 28),
-        calories: 180 + Math.floor(h * 620),
-        chefPick: h > 0.78,
-        img: imgs[n % imgs.length],
-        desc: `Crafted for Safra · ${cat.label.toLowerCase()} signature`,
-      })
-      i++
-    }
-  }
-  // pad to 115 with variants
-  while (items.length < 115) {
-    const base = items[items.length % 100]
-    const h = hash(items.length + 7)
-    items.push({
-      ...base,
-      id: `extra-${items.length}`,
-      name: `${base.name} Reserve`,
-      price: Math.round((base.price + h * 4) * 100) / 100,
-      chefPick: h > 0.85,
-      rating: Math.min(5, Math.round((base.rating + 0.1) * 10) / 10),
-    })
-  }
-  return items
-}
+/**
+ * Curated signature menu — one unique photograph per dish.
+ * Image subject matches the dish name. Never pad by reusing photos.
+ */
+export const SIGNATURE_MENU: MenuItem[] = [
+  // 🍔 Burgers (3)
+  {
+    id: 'burger-wagyu',
+    name: 'Truffle Wagyu Burger',
+    category: 'burgers',
+    price: 24,
+    rating: 4.9,
+    time: 22,
+    chefPick: true,
+    img: img('photo-1568901346375-23c9450c58cd'),
+    desc: 'Wagyu patty, black truffle aioli, aged cheddar, brioche.',
+  },
+  {
+    id: 'burger-smash',
+    name: 'Double Smash Cheeseburger',
+    category: 'burgers',
+    price: 18,
+    rating: 4.8,
+    time: 18,
+    img: img('photo-1550547660-d9450f859349'),
+    desc: 'Two thin smash patties, American cheese, house pickles.',
+  },
+  {
+    id: 'burger-chicken',
+    name: 'Crispy Chicken Burger',
+    category: 'burgers',
+    price: 16,
+    rating: 4.7,
+    time: 20,
+    img: img('photo-1606755962773-d324e0a13086'),
+    desc: 'Buttermilk fried chicken, soft bun, herb mayo, slaw.',
+  },
 
-/** Cover dish — looks like a normal menu item; unlocks the secret SOS report flow. */
+  // 🍕 Pizza (3)
+  {
+    id: 'pizza-margherita',
+    name: 'Burrata Margherita Pizza',
+    category: 'pizza',
+    price: 21,
+    rating: 4.9,
+    time: 25,
+    chefPick: true,
+    img: img('photo-1574071318508-1cdbab80d002'),
+    desc: 'San Marzano tomato, fresh basil, torn burrata.',
+  },
+  {
+    id: 'pizza-pepperoni',
+    name: 'Fire Pepperoni Pizza',
+    category: 'pizza',
+    price: 19,
+    rating: 4.8,
+    time: 24,
+    img: img('photo-1628840042765-356cda07504e'),
+    desc: 'Cupped pepperoni, mozzarella, chili honey finish.',
+  },
+  {
+    id: 'pizza-mushroom',
+    name: 'Wild Mushroom Pizza',
+    category: 'pizza',
+    price: 20,
+    rating: 4.7,
+    time: 26,
+    img: img('photo-1513104890138-7c749659a591'),
+    desc: 'Roasted forest mushrooms, garlic oil, thyme.',
+  },
+
+  // 🍝 Pasta (3)
+  {
+    id: 'pasta-alfredo',
+    name: 'Creamy Alfredo Pasta',
+    category: 'pasta',
+    price: 19,
+    rating: 4.8,
+    time: 22,
+    img: img('photo-1645112411341-6c4fd023714a'),
+    desc: 'Fettuccine, Parmigiano cream, cracked pepper.',
+  },
+  {
+    id: 'pasta-carbonara',
+    name: 'Classic Carbonara',
+    category: 'pasta',
+    price: 20,
+    rating: 4.9,
+    time: 23,
+    chefPick: true,
+    img: img('photo-1612874742237-6526221588e3'),
+    desc: 'Egg yolk emulsion, guanciale, pecorino.',
+  },
+  {
+    id: 'pasta-pesto',
+    name: 'Basil Pesto Linguine',
+    category: 'pasta',
+    price: 18,
+    rating: 4.7,
+    time: 21,
+    img: img('photo-1473093295043-cdd812d0e601'),
+    desc: 'Genovese basil pesto, pine nuts, lemon zest.',
+  },
+
+  // 🍜 Asian (3)
+  {
+    id: 'asian-ramen',
+    name: 'Tonkotsu Ramen',
+    category: 'asian',
+    price: 17,
+    rating: 4.9,
+    time: 20,
+    chefPick: true,
+    img: img('photo-1569718212165-3a8278d5f624'),
+    desc: '12-hour pork broth, chashu, soft egg, nori.',
+  },
+  {
+    id: 'asian-nigiri',
+    name: 'Salmon Nigiri Set',
+    category: 'asian',
+    price: 22,
+    rating: 4.8,
+    time: 18,
+    img: img('photo-1579871494447-9811cf80d66c'),
+    desc: 'Hand-pressed sushi rice, Norwegian salmon, wasabi.',
+  },
+  {
+    id: 'asian-gyoza',
+    name: 'Pan-Seared Gyoza',
+    category: 'asian',
+    price: 14,
+    rating: 4.7,
+    time: 16,
+    img: img('photo-1496116218417-1a781b1c416c'),
+    desc: 'Pork and cabbage dumplings, crisp skirt, ponzu.',
+  },
+
+  // 🥗 Healthy (2)
+  {
+    id: 'healthy-med',
+    name: 'Mediterranean Salad',
+    category: 'healthy',
+    price: 15,
+    rating: 4.8,
+    time: 14,
+    img: img('photo-1512621776951-a57141f2eefd'),
+    desc: 'Tomato, cucumber, olives, feta, oregano oil.',
+  },
+  {
+    id: 'healthy-bowl',
+    name: 'Avocado Harvest Bowl',
+    category: 'healthy',
+    price: 16,
+    rating: 4.7,
+    time: 15,
+    img: img('photo-1546069901-ba9599a7e63c'),
+    desc: 'Avocado, grains, roasted veg, citrus dressing.',
+  },
+
+  // 🥩 Grills (3)
+  {
+    id: 'grill-ribeye',
+    name: 'Angus Ribeye Steak',
+    category: 'grills',
+    price: 38,
+    rating: 4.9,
+    time: 28,
+    chefPick: true,
+    img: img('photo-1600891964092-4316c288032e'),
+    desc: 'Dry-aged ribeye, bone marrow butter, sea salt.',
+  },
+  {
+    id: 'grill-ribs',
+    name: 'Smoked BBQ Ribs',
+    category: 'grills',
+    price: 32,
+    rating: 4.8,
+    time: 27,
+    img: img('photo-1544025162-d76694265947'),
+    desc: 'Slow-smoked ribs, sticky glaze, charred edge.',
+  },
+  {
+    id: 'grill-chicken',
+    name: 'Herb Roast Chicken',
+    category: 'grills',
+    price: 22,
+    rating: 4.7,
+    time: 25,
+    img: img('photo-1598103442097-8b74394b95c6'),
+    desc: 'Half chicken, rosemary garlic, pan juices.',
+  },
+
+  // 🍰 Desserts (2)
+  {
+    id: 'dessert-lava',
+    name: 'Chocolate Lava Cake',
+    category: 'desserts',
+    price: 12,
+    rating: 4.9,
+    time: 15,
+    img: img('photo-1624353365286-3f8d62daad51'),
+    desc: 'Warm dark chocolate centre, vanilla cream.',
+  },
+  {
+    id: 'dessert-cheesecake',
+    name: 'Vanilla Bean Cheesecake',
+    category: 'desserts',
+    price: 11,
+    rating: 4.8,
+    time: 12,
+    img: img('photo-1533134242443-d4fd215305ad'),
+    desc: 'New York style, berry compote, shortbread base.',
+  },
+
+  // 🥤 Drinks (3) — Water is the SOS cover item
+  {
+    id: 'drink-flatwhite',
+    name: 'Flat White',
+    category: 'drinks',
+    price: 5,
+    rating: 4.8,
+    time: 8,
+    img: img('photo-1495474472287-4d71bcdd2085'),
+    desc: 'Double ristretto, steamed milk, fine microfoam.',
+  },
+  {
+    id: 'drink-citrus',
+    name: 'Citrus Spark Mocktail',
+    category: 'drinks',
+    price: 8,
+    rating: 4.7,
+    time: 10,
+    img: img('photo-1514362545857-3bc16c4c7d1b'),
+    desc: 'Yuzu, lime, soda, mint — zero alcohol.',
+  },
+]
+
+/** Cover dish — looks like a normal drink; unlocks the secret SOS report flow. */
 export const WATER_ITEM: MenuItem = {
   id: 'water',
   name: 'Water',
-  category: 'soft-drinks',
+  category: 'drinks',
   price: 2,
   rating: 4.9,
   time: 5,
-  calories: 0,
-  chefPick: false,
   secretEntry: true,
-  img: 'https://images.unsplash.com/photo-1548839140-29a749e1cf4d?auto=format&fit=crop&w=1600&q=90',
-  desc: 'Still water · chilled',
+  img: img('photo-1548839140-29a749e1cf4d'),
+  desc: 'Still mineral water · chilled glass.',
 }
 
-export const MENU: MenuItem[] = [WATER_ITEM, ...buildMenu()]
+export const MENU: MenuItem[] = [...SIGNATURE_MENU, WATER_ITEM]
 
 export const API_BASE =
   process.env.NEXT_PUBLIC_BACKEND_URL?.replace(/\/$/, '') || 'http://127.0.0.1:8000'
@@ -235,10 +301,9 @@ export const PASSPORT_TOKEN_KEY = 'safra_passport_token'
 export const ADMIN_KEY_STORAGE = 'safra_admin_key'
 
 export const SUGGESTIONS = [
-  'Truffle burgers near me',
-  'Under 20 minutes',
-  'Chef picks tonight',
-  'Late night ramen',
-  'Healthy under 400 cal',
-  'Bubble tea + dessert',
+  'Truffle Wagyu Burger',
+  'Tonkotsu Ramen',
+  'Angus Ribeye',
+  'Burrata Margherita',
+  'Chocolate Lava Cake',
 ] as const

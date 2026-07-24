@@ -1,20 +1,12 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { CATEGORIES } from '@/lib/constants'
 import { useApp } from '@/components/providers/AppProvider'
 
 export function SearchExperience() {
   const { query, setQuery, category, setCategory, playClick } = useApp()
   const [focused, setFocused] = useState(false)
-
-  const chips = useMemo(() => {
-    const preferred = CATEGORIES.filter((c) =>
-      ['soft-drinks', 'pizza', 'burger', 'ramen', 'coffee', 'desserts'].includes(c.id),
-    )
-    const rest = CATEGORIES.filter((c) => !preferred.find((p) => p.id === c.id))
-    return [...preferred, ...rest].slice(0, 12)
-  }, [])
 
   return (
     <section id="search" className="relative z-10 py-16 md:py-20">
@@ -29,7 +21,7 @@ export function SearchExperience() {
             onChange={(e) => setQuery(e.target.value)}
             onFocus={() => setFocused(true)}
             onBlur={() => setFocused(false)}
-            placeholder="Search dishes…"
+            placeholder="Search the signature menu…"
             className="w-full bg-transparent px-5 py-3.5 text-sm text-ivory outline-none placeholder:text-muted"
           />
         </div>
@@ -49,7 +41,7 @@ export function SearchExperience() {
           >
             All
           </button>
-          {chips.map((c) => (
+          {CATEGORIES.map((c) => (
             <button
               key={c.id}
               type="button"
@@ -63,6 +55,9 @@ export function SearchExperience() {
                   : 'border-ivory/10 text-soft hover:border-ivory/25'
               }`}
             >
+              <span className="mr-1.5" aria-hidden>
+                {c.emoji}
+              </span>
               {c.label}
             </button>
           ))}

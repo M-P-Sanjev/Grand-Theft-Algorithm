@@ -16,7 +16,7 @@ AI-powered safety platform with a **Safra food-ordering cover app**. A menu item
 ## Water cover flow
 
 1. Open Safra menu → select **Water** (does not add to cart).
-2. Enter the secret passport OTP (default `SAFEWATER`).
+2. Enter the secret passport OTP (default `SAFRA`).
 3. On `/report`, allow **location access** (“confirm delivery area”) so GPS is attached to the case.
 4. Fill abuse notes + optional evidence, then submit.
 5. Orchestration runs immediately:
@@ -65,23 +65,68 @@ npm run dev
 
 Open http://localhost:3000
 
-- Victim: Menu → **Water** → `SAFEWATER` → `/report` → see risk + RAG legal/therapy
+- Victim: Menu → **Water** → `SAFRA` → `/report` → see risk + RAG legal/therapy
 - Secure inbox: `/secure/<token>` from the confirmation screen
 - Admin: http://localhost:3000/admin → `admin123` (Leaflet map loads without extra keys)
 
-### RAG (legal + therapy)
+### Crisis command center (not a chatbot)
+
+Pipeline per message / case:
+`emotion → severity classifier (no LLM) → safety plan → vector RAG → companion reply → live admin/victim boards`
+
+- Therapy: acknowledge → validate → one step → one question
+- Legal: plain-English rights, steps, time, documents, helplines, “What next?”
+- Severity: violence/threat/fear/isolation/urgency/mental/children/weapon → Risk Index 0–100
+- Live: `GET /cases/stream` (SSE) + `WS /ws/live`
 
 - Corpus: `backend/knowledge/legal/*.md` and `backend/knowledge/therapy/*.md`
-- Index: auto-built to `backend/data/rag_index.json` on first ask
-- Without `GEMINI_API_KEY`: local TF-IDF retrieval + extractive answers from top chunks
-- With `GEMINI_API_KEY`: Gemini embeddings + grounded generation over retrieved chunks
-- Chat UI shows **Sources** under each answer
+- Local index: `backend/data/rag_index.json` (always available as fallback)
+- **Streaming chat:** `POST /cases/{id}/agents/{legal|therapy}/stream` (SSE token stream)
+- UI: premium `AiChatPanel` (bubbles, history, markdown, sources, quick prompts, regenerate/copy/read-aloud)
+
+Passport OTP default: **`SAFRA`**
+
+### Option A — Gemini + MongoDB Atlas Vector Search
+
+1. Open [Google AI Studio](https://aistudio.google.com/apikey) → **Create API key** → copy the key.
+2. In `backend/.env`, set:
+   - `GEMINI_API_KEY=<your key>`
+   - `MONGO_ENDPOINT=mongodb+srv://<user>:<pass>@<cluster>.mongodb.net/?retryWrites=true&w=majority`
+   - `MONGO_DB_NAME=SheBuilds` (or your DB name)
+3. In [MongoDB Atlas](https://cloud.mongodb.com/):
+   1. Open your cluster → **Browse Collections**.
+   2. Create database `SheBuilds` and collection `rag_chunks` if they do not exist.
+   3. Select `rag_chunks` → **Search Indexes** → **Create Search Index** → **JSON Editor** → **Next**.
+   4. Index name: `rag_vector_index`
+   5. Paste:
+
+```json
+{
+  "fields": [
+    {
+      "type": "vector",
+      "path": "embedding",
+      "numDimensions": 768,
+      "similarity": "cosine"
+    }
+  ]
+}
+```
+
+   6. Click **Create Search Index**. Wait until status is **Active** (often 1–2 minutes).
+4. Restart the API from the repo root. On startup it seeds `rag_chunks` with Gemini `gemini-embedding-001` (768-d) vectors when keys are present.
+5. Or from repo root after `MONGO_ENDPOINT` is set: `python -m backend.scripts.setup_atlas_rag`
+6. Optional reindex: `POST http://127.0.0.1:8000/rag/reindex` with header `X-Admin-Key: admin123`.
+
+Without Atlas/Gemini, local TF-IDF RAG still streams answers in the same UI.
 
 ### Optional cloud keys (`backend/.env`)
 
 | Variable | Effect when set |
 |----------|-----------------|
-| `GEMINI_API_KEY` | Better RAG embeddings + generated answers; also risk triage |
+| `GEMINI_API_KEY` | Embeddings + streamed answers; also risk triage |
+| `MONGO_ENDPOINT` | Atlas case mirror + vector RAG store |
+| `MONGO_RAG_INDEX` | Vector index name (default `rag_vector_index`) |
 | `TWILIO_*` | SMS on police/NGO dispatch |
 | `SMTP_*` | Email on police/NGO dispatch |
 | `PRIVACY_SECRET` | Fernet key material for encrypted messages |

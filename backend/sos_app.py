@@ -11,7 +11,7 @@ import json
 import logging
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, Header, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -20,7 +20,7 @@ from backend.cases import (
     admin_key,
     append_secure_message,
     consume_or_check_token,
-    create_case,
+    create_incident_fast,
     find_case_by_secure_token,
     get_case,
     issue_passport_token,
@@ -37,7 +37,9 @@ from backend.orchestration.engine import run_orchestration
 from backend.orchestration.privacy import decrypt_text, redact_case_for_list
 from backend.schema import (
     AgentQuestionBody,
+    ChatStreamBody,
     EscalateBody,
+    LocationUpdateBody,
     PassportRequest,
     SecureMessageBody,
     SecureReplyBody,
@@ -54,9 +56,11 @@ app = FastAPI(title='Safra SOS API')
 async def _startup_rag_index():
     try:
         from backend.orchestration.rag.ingest import ensure_index
+        from backend.orchestration.rag.mongo_store import seed_knowledge_to_mongo
 
         ensure_index(force=True)
-        logger.info('RAG knowledge index ready')
+        seed = seed_knowledge_to_mongo(force=False)
+        logger.info('RAG knowledge index ready; mongo_seed=%s', seed)
     except Exception as exc:
         logger.warning('RAG index build skipped: %s', exc)
 app.add_middleware(
@@ -92,6 +96,7 @@ async def verify_passport(body: PassportRequest):
 
 @app.post('/cases')
 async def create_abuse_case(
+    background_tasks: BackgroundTasks,
     notes: str = Form(...),
     frequency: str = Form('once'),
     severity: str = Form('medium'),
@@ -100,6 +105,17 @@ async def create_abuse_case(
     location: str = Form(None),
     lat: str = Form(None),
     lng: str = Form(None),
+    location_city: str = Form(None),
+    location_district: str = Form(None),
+    location_state: str = Form(None),
+    location_hide_exact: str = Form('1'),
+    location_accuracy_band: str = Form(None),
+    location_accuracy_m: str = Form(None),
+    location_source: str = Form(None),
+    location_live: str = Form('0'),
+    location_radius_m: str = Form(None),
+    location_nearest_eta_min: str = Form(None),
+    location_nearest_kind: str = Form(None),
     token: str = Form(...),
     files: list[UploadFile] = File(default=[]),
 ):
@@ -122,15 +138,53 @@ async def create_abuse_case(
     except ValueError:
         raise HTTPException(status_code=400, detail='Invalid coordinates')
 
+    acc_m = None
+    try:
+        if location_accuracy_m not in (None, ''):
+            acc_m = float(location_accuracy_m)
+    except ValueError:
+        acc_m = None
+
+    radius_m = None
+    try:
+        if location_radius_m not in (None, ''):
+            radius_m = float(location_radius_m)
+    except ValueError:
+        radius_m = None
+
+    nearest_eta = None
+    try:
+        if location_nearest_eta_min not in (None, ''):
+            nearest_eta = int(float(location_nearest_eta_min))
+    except ValueError:
+        nearest_eta = None
+
+    location_meta = {
+        'city': location_city,
+        'district': location_district,
+        'state': location_state,
+        'hide_exact': location_hide_exact in ('1', 'true', 'True'),
+        'accuracy_band': location_accuracy_band,
+        'accuracy_m': acc_m,
+        'source': location_source or 'none',
+        'live_tracking': location_live in ('1', 'true', 'True'),
+        'radius_m': radius_m,
+        'label': location,
+        'nearest_eta_min': nearest_eta,
+        'nearest_kind': location_nearest_kind,
+    }
+
+    # Fast path: skip heavy file IO on critical path when possible — still accept small uploads
     evidence_meta = []
     upload_list = files if isinstance(files, list) else ([files] if files else [])
+    pending_files: list[tuple[str, bytes]] = []
     for upload in upload_list:
         if not getattr(upload, 'filename', None):
             continue
         content = await upload.read()
         if not content:
             continue
-        evidence_meta.append(save_evidence_file(upload.filename, content))
+        pending_files.append((upload.filename, content))
 
     payload = CaseCreate(
         notes=notes,
@@ -142,18 +196,66 @@ async def create_abuse_case(
         lat=lat_f,
         lng=lng_f,
         token=token,
-        evidence=evidence_meta,
+        evidence=[],
+        location_meta=location_meta,
     )
-    case = create_case(payload, evidence_meta)
-    summary = case.pop('orchestration_summary', None) or {}
-    secure_token = case.pop('secure_token', None) or summary.get('secure_token')
+    case = create_incident_fast(payload, evidence_meta)
+
+    from backend.orchestration.crisis.live import publish, publish_case
+    from backend.orchestration.crisis.jobs import run_incident_pipeline
+
+    publish(
+        {
+            'type': 'incident_received',
+            'case_id': case['id'],
+            'public_id': case.get('public_id'),
+            'name': case.get('name'),
+            'location': case.get('location'),
+            'lat': case.get('lat'),
+            'lng': case.get('lng'),
+            'created_at': case.get('created_at'),
+            'risk_tier': 'analyzing',
+            'pipeline_status': 'received',
+            'status': 'open',
+        }
+    )
+    publish_case(case, event_type='incident_received')
+
+    def _bg(case_id: str, files_blob: list[tuple[str, bytes]]) -> None:
+        if files_blob:
+            meta = []
+            for fname, content in files_blob:
+                meta.append(save_evidence_file(fname, content))
+            if meta:
+                update_case(case_id, evidence=meta)
+        run_incident_pipeline(case_id)
+
+    background_tasks.add_task(_bg, case['id'], pending_files)
+
     return {
         'status': 'ok',
-        'case': case,
-        'message': 'Order received',
-        'routing': case['routing'],
-        'orchestration': summary,
-        'secure_token': secure_token,
+        'case_id': case['id'],
+        'public_id': case.get('public_id'),
+        'case': {
+            'id': case['id'],
+            'public_id': case.get('public_id'),
+            'created_at': case.get('created_at'),
+            'status': 'open',
+            'pipeline_status': 'received',
+            'risk_tier': 'analyzing',
+            'location': case.get('location'),
+            'lat': case.get('lat'),
+            'lng': case.get('lng'),
+        },
+        'message': 'Your request has been received.',
+        'pipeline': {'status': 'received'},
+        'orchestration': {
+            'case_id': case['id'],
+            'public_id': case.get('public_id'),
+            'risk_tier': 'analyzing',
+            'live_status': case.get('live_status'),
+            'pipeline': case.get('pipeline'),
+        },
     }
 
 
@@ -171,22 +273,41 @@ async def get_cases(
 
 @app.get('/cases/stream')
 async def stream_cases(admin_key_q: str = ''):
-    """SSE feed for admin. EventSource cannot set headers → use ?admin_key_q=."""
+    """SSE feed for admin — cases + live crisis events."""
     _require_admin(admin_key_q)
 
+    from backend.orchestration.crisis.live import encode, subscribe, unsubscribe
+
     async def event_gen():
+        q = subscribe()
         last = ''
-        while True:
-            payload = {
-                'cases': [redact_case_for_list(c) for c in list_cases()],
-            }
-            blob = json.dumps(payload)
-            if blob != last:
-                yield f'data: {blob}\n\n'
-                last = blob
-            else:
-                yield f': ping\n\n'
-            await asyncio.sleep(3)
+        try:
+            # Initial snapshot
+            payload = {'type': 'cases', 'cases': [redact_case_for_list(c) for c in list_cases()]}
+            last = json.dumps(payload)
+            yield f'event: cases\ndata: {last}\n\n'
+            while True:
+                # Drain live hub quickly
+                try:
+                    while True:
+                        ev = q.get_nowait()
+                        yield f'event: live\ndata: {encode(ev)}\n\n'
+                except asyncio.QueueEmpty:
+                    pass
+
+                payload = {
+                    'type': 'cases',
+                    'cases': [redact_case_for_list(c) for c in list_cases()],
+                }
+                blob = json.dumps(payload)
+                if blob != last:
+                    yield f'event: cases\ndata: {blob}\n\n'
+                    last = blob
+                else:
+                    yield f': ping\n\n'
+                await asyncio.sleep(1.5)
+        finally:
+            unsubscribe(q)
 
     return StreamingResponse(
         event_gen(),
@@ -197,6 +318,78 @@ async def stream_cases(admin_key_q: str = ''):
             'X-Accel-Buffering': 'no',
         },
     )
+
+
+@app.websocket('/ws/live')
+async def ws_live(websocket: WebSocket):
+    """WebSocket live command center (filter by case_id query when set)."""
+    await websocket.accept()
+    from backend.orchestration.crisis.live import encode, set_presence, subscribe, unsubscribe
+
+    case_id = websocket.query_params.get('case_id') or ''
+    role = websocket.query_params.get('role') or 'admin'
+    if case_id:
+        set_presence(case_id, role, True)
+
+    q = subscribe()
+    try:
+        await websocket.send_text(
+            encode({'type': 'hello', 'case_id': case_id or None, 'role': role})
+        )
+        while True:
+            try:
+                ev = await asyncio.wait_for(q.get(), timeout=15.0)
+            except asyncio.TimeoutError:
+                await websocket.send_text(encode({'type': 'ping'}))
+                continue
+            if case_id and ev.get('case_id') and ev.get('case_id') != case_id:
+                continue
+            await websocket.send_text(encode(ev))
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        if case_id:
+            set_presence(case_id, role, False)
+        unsubscribe(q)
+
+
+@app.post('/cases/{case_id}/location')
+async def update_case_location(case_id: str, body: LocationUpdateBody):
+    case = get_case(case_id)
+    if not case:
+        raise HTTPException(status_code=404, detail='Case not found')
+    if not _authorize_agent(body.admin_key, body.token):
+        raise HTTPException(status_code=401, detail='Unauthorized')
+
+    privacy = dict(case.get('location_privacy') or {})
+    privacy['live_tracking'] = bool(body.live)
+    privacy['accuracy_m'] = body.accuracy
+    privacy['last_live_at'] = __import__('backend.cases', fromlist=['utc_now']).utc_now()
+
+    updated = update_case(
+        case_id,
+        lat=body.lat,
+        lng=body.lng,
+        location_updated_at=privacy['last_live_at'],
+        location_privacy=privacy,
+    )
+    try:
+        from backend.orchestration.crisis.live import publish_case
+        from backend.orchestration.crisis.timeline import append_timeline
+
+        if updated:
+            append_timeline(
+                updated,
+                'Live location update' if body.live else 'Location updated',
+                detail=f'accuracy={body.accuracy}',
+            )
+            update_case(case_id, timeline=updated.get('timeline'))
+            publish_case(updated, event_type='case_update')
+    except Exception:
+        pass
+    return {'status': 'ok', 'case': get_case(case_id)}
 
 
 @app.get('/cases/{case_id}')
@@ -305,6 +498,106 @@ async def ask_therapy(case_id: str, body: AgentQuestionBody):
         },
     )
     return result
+
+
+def _authorize_agent(body_admin: str | None, body_token: str | None) -> bool:
+    if body_admin and body_admin == admin_key():
+        return True
+    if body_token and (
+        consume_or_check_token(body_token, consume=False)
+        or find_case_by_secure_token(body_token)
+    ):
+        return True
+    return False
+
+
+@app.post('/cases/{case_id}/agents/{kind}/stream')
+async def stream_agent(case_id: str, kind: str, body: ChatStreamBody):
+    if kind not in ('legal', 'therapy'):
+        raise HTTPException(status_code=404, detail='Unknown agent')
+    case = get_case(case_id)
+    if not case:
+        raise HTTPException(status_code=404, detail='Case not found')
+    if not _authorize_agent(body.admin_key, body.token):
+        raise HTTPException(status_code=401, detail='Unauthorized')
+
+    from backend.orchestration.rag.chat_stream import new_session_id, stream_agent_reply
+
+    session_id = (body.session_id or '').strip() or new_session_id()
+
+    async def event_gen():
+        yield f'event: session\ndata: {json.dumps({"session_id": session_id})}\n\n'
+        async for block in stream_agent_reply(
+            kind=kind,
+            question=body.question,
+            case=case,
+            session_id=session_id,
+        ):
+            yield block
+        # Persist crisis fields mutated during the stream
+        update_case(
+            case_id,
+            risk_score=case.get('risk_score'),
+            risk_tier=case.get('risk_tier'),
+            severity=case.get('severity'),
+            crisis=case.get('crisis'),
+            safety_plan=case.get('safety_plan'),
+            ai_summary=case.get('ai_summary'),
+            next_actions=case.get('next_actions'),
+            live_status=case.get('live_status'),
+            pipeline_live=case.get('pipeline_live'),
+            timeline=case.get('timeline'),
+            risk_history=case.get('risk_history'),
+            last_ai_action=case.get('last_ai_action'),
+            last_activity_at=case.get('last_activity_at'),
+            crisis_history=case.get('crisis_history'),
+            resources_found=case.get('resources_found'),
+            updated_at=case.get('updated_at'),
+        )
+
+    return StreamingResponse(
+        event_gen(),
+        media_type='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no',
+        },
+    )
+
+
+@app.get('/cases/{case_id}/agents/{kind}/history')
+async def agent_history(
+    case_id: str,
+    kind: str,
+    session_id: str = '',
+    x_admin_key: str = Header(default=''),
+    token: str = '',
+):
+    if kind not in ('legal', 'therapy'):
+        raise HTTPException(status_code=404, detail='Unknown agent')
+    if not get_case(case_id):
+        raise HTTPException(status_code=404, detail='Case not found')
+    if not _authorize_agent(x_admin_key or None, token or None):
+        raise HTTPException(status_code=401, detail='Unauthorized')
+    from backend.orchestration.rag.chat_stream import get_history
+
+    return {
+        'session_id': session_id,
+        'messages': get_history(case_id, kind, session_id) if session_id else [],
+    }
+
+
+@app.post('/rag/reindex')
+async def rag_reindex(body: dict):
+    if body.get('admin_key') != admin_key():
+        raise HTTPException(status_code=401, detail='Unauthorized')
+    from backend.orchestration.rag.ingest import ensure_index
+    from backend.orchestration.rag.mongo_store import seed_knowledge_to_mongo
+
+    local = ensure_index(force=True)
+    mongo = seed_knowledge_to_mongo(force=True)
+    return {'local_chunks': len(local.get('chunks') or []), 'mongo': mongo}
 
 
 @app.post('/cases/{case_id}/secure-message')

@@ -51,9 +51,10 @@ def _gemini_embed(texts: list[str]) -> list[list[float]] | None:
         out: list[list[float]] = []
         for text in texts:
             resp = genai.embed_content(
-                model='models/text-embedding-004',
+                model=os.getenv('GEMINI_EMBED_MODEL', 'models/gemini-embedding-001'),
                 content=text[:8000],
                 task_type='retrieval_document',
+                output_dimensionality=768,
             )
             emb = resp.get('embedding') if isinstance(resp, dict) else None
             if emb is None and hasattr(resp, 'embedding'):

@@ -58,3 +58,19 @@ class SecureMessageBody(BaseModel):
 
 class SecureReplyBody(BaseModel):
     message: str
+
+
+class ChatStreamBody(BaseModel):
+    question: str
+    session_id: Optional[str] = None
+    admin_key: Optional[str] = None
+    token: Optional[str] = None
+
+
+class LocationUpdateBody(BaseModel):
+    token: Optional[str] = None
+    admin_key: Optional[str] = None
+    lat: float
+    lng: float
+    accuracy: Optional[float] = None
+    live: bool = False

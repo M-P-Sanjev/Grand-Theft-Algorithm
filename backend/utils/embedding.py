@@ -9,9 +9,10 @@ load_dotenv()
 def generate_text_embedding(text):
     genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
     response = genai.embed_content(
-        model="models/text-embedding-004",
+        model=os.getenv("GEMINI_EMBED_MODEL", "models/gemini-embedding-001"),
         content=text,
         task_type="retrieval_document",
+        output_dimensionality=768,
         title="Embedding of culprit info",
     )
     return response["embedding"]

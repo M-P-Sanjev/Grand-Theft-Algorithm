@@ -31,7 +31,7 @@ def _gemini_generate(system: str, prompt: str) -> str | None:
         import google.generativeai as genai
 
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel(os.getenv('GEMINI_CHAT_MODEL', 'gemini-2.0-flash'))
         text = model.generate_content(f'{system}\n\n{prompt}').text or ''
         return text.strip() or None
     except Exception:

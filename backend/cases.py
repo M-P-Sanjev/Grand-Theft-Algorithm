@@ -38,6 +38,7 @@ class CaseCreate(BaseModel):
     lng: Optional[float] = None
     evidence: list[dict[str, str]] = Field(default_factory=list)
     token: str
+    location_meta: Optional[dict[str, Any]] = None
 
 
 class EscalateRequest(BaseModel):
@@ -54,7 +55,7 @@ def utc_now() -> str:
 
 
 def secret_passport() -> str:
-    return os.getenv('SECRET_PASSPORT', 'SAFEWATER')
+    return os.getenv('SECRET_PASSPORT', 'SAFRA')
 
 
 def admin_key() -> str:
@@ -123,11 +124,32 @@ def consume_or_check_token(token: str, consume: bool = False) -> bool:
     return True
 
 
-def create_case(payload: CaseCreate, evidence_meta: list[dict[str, str]]) -> dict[str, Any]:
-    routing = compute_routing(payload.severity, payload.frequency)
+def _next_public_id(cases: list[dict[str, Any]]) -> str:
+    """Allocate durable HVN-#### public incident ids."""
+    max_n = 1000
+    for c in cases:
+        pid = str(c.get('public_id') or '')
+        if pid.upper().startswith('HVN-'):
+            tail = pid.split('-', 1)[-1]
+            try:
+                max_n = max(max_n, int(tail))
+            except ValueError:
+                continue
+    return f'HVN-{max_n + 1}'
+
+
+def create_incident_fast(payload: CaseCreate, evidence_meta: list[dict[str, str]]) -> dict[str, Any]:
+    """
+    Persist incident only — no RAG/LLM/orchestration.
+    Target: return in well under 500ms.
+    """
+    cases = _load_cases()
+    public_id = _next_public_id(cases)
     has_coords = payload.lat is not None and payload.lng is not None
+    now = utc_now()
     case = {
         'id': str(uuid.uuid4()),
+        'public_id': public_id,
         'notes': payload.notes.strip(),
         'frequency': payload.frequency,
         'severity': payload.severity,
@@ -136,42 +158,57 @@ def create_case(payload: CaseCreate, evidence_meta: list[dict[str, str]]) -> dic
         'location': (payload.location or '').strip() or None,
         'lat': float(payload.lat) if has_coords else None,
         'lng': float(payload.lng) if has_coords else None,
-        'location_updated_at': utc_now() if has_coords else None,
+        'location_updated_at': now if has_coords else None,
+        'location_privacy': payload.location_meta or {},
         'evidence': evidence_meta,
         'status': 'open',
-        'routing': routing,
-        'escalation_contacts': escalation_contacts(routing),
+        'routing': 'admin',  # provisional until risk job finishes
+        'escalation_contacts': escalation_contacts('admin'),
         'risk_score': None,
-        'risk_tier': None,
+        'risk_tier': 'analyzing',
+        'pipeline_status': 'received',
+        'pipeline': {
+            'status': 'received',
+            'stages': [{'stage': 'received', 'at': now, 'label': 'Incident received'}],
+        },
+        'conversation': [
+            {'role': 'victim', 'content': payload.notes.strip(), 'at': now},
+        ],
         'agent_plan': [],
         'agent_log': [],
+        'timeline': [
+            {'at': now, 'event': 'Incident received', 'detail': public_id, 'meta': {}},
+        ],
+        'live_status': {
+            'analysing': True,
+            'plain': 'We\'re analysing it now.',
+            'severity_detected': 'analyzing',
+        },
         'privacy': {'redacted_preview': False, 'contact_visible_to': 'admin'},
         'secure_channel': {},
-        'created_at': utc_now(),
-        'updated_at': utc_now(),
-        # Shape compatible with older admin dashboard fields
+        'created_at': now,
+        'updated_at': now,
         'Name': (payload.name or '').strip() or 'Anonymous',
-        'Severity of domestic violence': payload.severity.replace('_', ' ').title()
-        if payload.severity != 'critical'
-        else 'Very High',
+        'Severity of domestic violence': 'Analyzing',
         'Frequency of Incidents': payload.frequency,
         'Current Situation': payload.notes.strip(),
         'state': (payload.location or '').strip() or 'Unknown',
     }
-
-    from backend.orchestration.engine import run_orchestration, survivor_summary
-
-    case = run_orchestration(case, trigger='create')
-    summary = survivor_summary(case)
-
-    # Persist without one-time plaintext token
-    persist = {k: v for k, v in case.items() if not k.startswith('_')}
-    cases = _load_cases()
-    cases.insert(0, persist)
+    cases.insert(0, case)
     _save_cases(cases)
+    return case
 
-    # Return case plus orchestration fields for the survivor UI
-    out = dict(persist)
+
+def create_case(payload: CaseCreate, evidence_meta: list[dict[str, str]]) -> dict[str, Any]:
+    """Legacy sync path — prefer create_incident_fast + background jobs."""
+    case = create_incident_fast(payload, evidence_meta)
+    from backend.orchestration.crisis.jobs import run_incident_pipeline
+    from backend.orchestration.engine import survivor_summary
+
+    run_incident_pipeline(case['id'])
+    case = get_case(case['id']) or case
+    summary = survivor_summary(case)
+    out = dict(case)
     out['orchestration_summary'] = summary
     if summary.get('secure_token'):
         out['secure_token'] = summary['secure_token']
