@@ -1,6 +1,6 @@
 # Safra
 
-### *"-Every Silent Cry Matters."*
+### *"Help that doesn’t look like help.."*
 
 **Rush Hour Hackathon** · Team **Grand Theft Algorithm**  
 **GitHub:** [M-P-Sanjev/Grand-Theft-Algorithm](https://github.com/M-P-Sanjev/Grand-Theft-Algorithm)
