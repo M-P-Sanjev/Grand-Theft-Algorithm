@@ -101,7 +101,7 @@ All pushes to this repo use the commit comment **`Chris`**.
 
 ## Team
 
-**Hackathon:** PEC HACKS — Open Innovation  
+**Hackathon:** RUSH HOUR Open Innovation  
 **Repo:** Grand-Theft-Algorithm  
 
 | Name | Role |
