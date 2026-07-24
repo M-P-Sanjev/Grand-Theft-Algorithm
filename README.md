@@ -46,8 +46,8 @@ Safra is **safety infrastructure**, not another chatbot:
 
 | Layer | What it does |
 |-------|----------------|
-| **Cover Mode** | App looks like recipes / kirana list |
-| **Quiet Relay** | “Share recipe” secretly sends a structured NGO alert |
+| **Cover Mode** | App looks like ordering or shopping list |
+| **Quiet Relay** | “Order” secretly sends a structured NGO alert |
 | **Clarity Tools** | Camera evidence vault + Rights RAG + silent Calm Cards |
 
 This core (cover → private vault → trusted relay → human console) can later expand to other discreet document / reminder flows **without changing the product spine**.
