@@ -8,22 +8,52 @@ import {
   PASSPORT_TOKEN_KEY,
   SITE,
 } from '@/lib/constants'
+import { AgentChat } from '@/components/agents/AgentChat'
+import dynamic from 'next/dynamic'
+
+const LocationPicker = dynamic(
+  () =>
+    import('@/components/report/LocationPickerMap').then((m) => m.LocationPickerMap),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex h-[220px] items-center justify-center rounded-2xl border border-ivory/10 text-xs text-muted">
+        Loading map…
+      </div>
+    ),
+  },
+)
+
+type Orchestration = {
+  case_id?: string
+  risk_score?: number
+  risk_tier?: string
+  routing?: string
+  legal_tip?: string
+  therapy_tip?: string
+  notify_status?: string
+  secure_token?: string
+}
 
 type SubmitResult = {
   routing: 'admin' | 'ngo' | 'police'
   message: string
+  caseId: string
+  orchestration: Orchestration
+  secureToken?: string
 }
 
 type GpsState = {
   lat: number | null
   lng: number | null
   accuracy: number | null
-  status: 'pending' | 'ok' | 'denied' | 'unavailable'
+  status: 'pending' | 'ok' | 'denied' | 'unavailable' | 'pinned'
 }
 
 export default function ReportPage() {
   const router = useRouter()
   const [ready, setReady] = useState(false)
+  const [passportToken, setPassportToken] = useState('')
   const [notes, setNotes] = useState('')
   const [frequency, setFrequency] = useState('once')
   const [severity, setSeverity] = useState('medium')
@@ -47,6 +77,7 @@ export default function ReportPage() {
       router.replace('/')
       return
     }
+    setPassportToken(token)
     setReady(true)
 
     if (!navigator.geolocation) {
@@ -55,6 +86,38 @@ export default function ReportPage() {
     }
 
     const watchId = navigator.geolocation.watchPosition(
+      (pos) => {
+        setGps((g) => {
+          if (g.status === 'pinned') return g
+          return {
+            lat: pos.coords.latitude,
+            lng: pos.coords.longitude,
+            accuracy: pos.coords.accuracy,
+            status: 'ok',
+          }
+        })
+      },
+      () => {
+        setGps((g) => {
+          if (g.status === 'pinned' || g.lat != null) {
+            return g.status === 'pinned' ? g : { ...g, status: 'ok' }
+          }
+          return { ...g, status: 'denied' }
+        })
+      },
+      { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 },
+    )
+
+    return () => navigator.geolocation.clearWatch(watchId)
+  }, [router])
+
+  function retryGps() {
+    if (!navigator.geolocation) {
+      setGps((g) => ({ ...g, status: 'unavailable' }))
+      return
+    }
+    setGps((g) => ({ ...g, status: 'pending' }))
+    navigator.geolocation.getCurrentPosition(
       (pos) => {
         setGps({
           lat: pos.coords.latitude,
@@ -66,14 +129,12 @@ export default function ReportPage() {
       () => {
         setGps((g) => ({
           ...g,
-          status: g.lat != null ? 'ok' : 'denied',
+          status: g.lat != null ? (g.status === 'pinned' ? 'pinned' : 'ok') : 'denied',
         }))
       },
-      { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 },
+      { enableHighAccuracy: true, timeout: 15000 },
     )
-
-    return () => navigator.geolocation.clearWatch(watchId)
-  }, [router])
+  }
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
@@ -110,9 +171,21 @@ export default function ReportPage() {
         setError(typeof data.detail === 'string' ? data.detail : 'Could not submit')
         return
       }
+      const orch: Orchestration = data.orchestration || {}
+      const caseId = orch.case_id || data.case?.id || ''
+      const secureToken = data.secure_token || orch.secure_token
+      if (secureToken) {
+        sessionStorage.setItem('safra_secure_token', secureToken)
+      }
+      if (caseId) {
+        sessionStorage.setItem('safra_case_id', caseId)
+      }
       setResult({
         routing: data.routing || data.case?.routing || 'admin',
         message: data.message || 'Order received',
+        caseId,
+        orchestration: orch,
+        secureToken,
       })
     } catch {
       setError('Service unavailable. Please try again.')
@@ -130,11 +203,15 @@ export default function ReportPage() {
   }
 
   const gpsLabel =
-    gps.status === 'ok' && gps.lat != null
-      ? `Delivery area confirmed (±${Math.round(gps.accuracy || 0)}m)`
+    (gps.status === 'ok' || gps.status === 'pinned') && gps.lat != null
+      ? gps.status === 'pinned'
+        ? 'Delivery pin set on map'
+        : `Delivery area confirmed (±${Math.round(gps.accuracy || 0)}m)`
       : gps.status === 'pending'
         ? 'Confirming delivery area…'
-        : 'Delivery area unavailable (you can still submit)'
+        : 'Location blocked — tap the map below to set your delivery area'
+
+  const showPicker = gps.status === 'denied' || gps.status === 'unavailable' || gps.status === 'pinned'
 
   return (
     <main className="min-h-[100svh] bg-void text-ivory">
@@ -146,43 +223,130 @@ export default function ReportPage() {
         </p>
 
         {result ? (
-          <div className="glass mt-10 rounded-[1.75rem] p-8">
-            <p className="text-[10px] tracking-[0.28em] text-gold uppercase">Confirmed</p>
-            <h2 className="font-display mt-3 text-3xl">{result.message}</h2>
-            <p className="mt-4 text-sm text-soft/85">
-              {result.routing === 'police' &&
-                'Your order has been prioritized for immediate local assistance.'}
-              {result.routing === 'ngo' &&
-                'Your order has been routed to a support partner for follow-up.'}
-              {result.routing === 'admin' &&
-                'Your order is with our support desk. Help is on the way.'}
-            </p>
-            <div className="mt-8 flex flex-wrap gap-3">
-              <Link
-                href="/"
-                className="rounded-full bg-ivory px-6 py-3 text-[10px] tracking-[0.22em] text-void uppercase"
-              >
-                Back to menu
-              </Link>
-              <a
-                href="http://localhost:3001/therapybot"
-                className="rounded-full border border-ivory/20 px-6 py-3 text-[10px] tracking-[0.22em] text-soft uppercase"
-              >
-                Support resources
-              </a>
+          <div className="mt-10 space-y-6">
+            <div className="glass rounded-[1.75rem] p-8">
+              <p className="text-[10px] tracking-[0.28em] text-gold uppercase">Confirmed</p>
+              <h2 className="font-display mt-3 text-3xl">{result.message}</h2>
+              <p className="mt-4 text-sm text-soft/85">
+                {result.routing === 'police' &&
+                  'Your order has been prioritized for immediate local assistance.'}
+                {result.routing === 'ngo' &&
+                  'Your order has been routed to a support partner for follow-up.'}
+                {result.routing === 'admin' &&
+                  'Your order is with our support desk. Help is on the way.'}
+              </p>
+              <div className="mt-6 grid gap-3 text-sm sm:grid-cols-3">
+                <div className="rounded-2xl border border-ivory/10 px-4 py-3">
+                  <p className="text-[10px] tracking-[0.18em] text-muted uppercase">Risk</p>
+                  <p className="mt-1 uppercase text-gold">
+                    {result.orchestration.risk_tier || '—'}{' '}
+                    {result.orchestration.risk_score != null
+                      ? `(${result.orchestration.risk_score})`
+                      : ''}
+                  </p>
+                </div>
+                <div className="rounded-2xl border border-ivory/10 px-4 py-3">
+                  <p className="text-[10px] tracking-[0.18em] text-muted uppercase">Routed</p>
+                  <p className="mt-1 uppercase">{result.routing}</p>
+                </div>
+                <div className="rounded-2xl border border-ivory/10 px-4 py-3">
+                  <p className="text-[10px] tracking-[0.18em] text-muted uppercase">Notify</p>
+                  <p className="mt-1 text-xs">
+                    {result.orchestration.notify_status || 'queued'}
+                  </p>
+                </div>
+              </div>
+              {result.orchestration.legal_tip && (
+                <p className="mt-5 whitespace-pre-wrap rounded-2xl border border-gold/20 bg-gold/5 px-4 py-3 text-sm text-soft/90">
+                  {result.orchestration.legal_tip}
+                </p>
+              )}
+              {result.orchestration.therapy_tip && (
+                <p className="mt-3 whitespace-pre-wrap rounded-2xl border border-ivory/10 px-4 py-3 text-sm text-soft/85">
+                  {result.orchestration.therapy_tip}
+                </p>
+              )}
+              {result.secureToken && (
+                <p className="mt-5 text-sm text-gold-soft">
+                  Secure channel:{' '}
+                  <Link
+                    className="underline"
+                    href={`/secure/${result.secureToken}`}
+                  >
+                    open private messages
+                  </Link>
+                </p>
+              )}
+              <div className="mt-8 flex flex-wrap gap-3">
+                <Link
+                  href="/"
+                  className="rounded-full bg-ivory px-6 py-3 text-[10px] tracking-[0.22em] text-void uppercase"
+                >
+                  Back to menu
+                </Link>
+                {result.secureToken && (
+                  <Link
+                    href={`/secure/${result.secureToken}`}
+                    className="rounded-full border border-ivory/20 px-6 py-3 text-[10px] tracking-[0.22em] text-soft uppercase"
+                  >
+                    Secure channel
+                  </Link>
+                )}
+              </div>
             </div>
+
+            {result.caseId && (
+              <div className="grid gap-4 md:grid-cols-2">
+                <AgentChat
+                  caseId={result.caseId}
+                  kind="legal"
+                  auth={{ token: passportToken || result.secureToken }}
+                />
+                <AgentChat
+                  caseId={result.caseId}
+                  kind="therapy"
+                  auth={{ token: passportToken || result.secureToken }}
+                />
+              </div>
+            )}
           </div>
         ) : (
           <form onSubmit={onSubmit} className="glass mt-10 space-y-5 rounded-[1.75rem] p-7 md:p-9">
             <div
               className={`rounded-2xl border px-4 py-3 text-sm ${
-                gps.status === 'ok'
+                gps.status === 'ok' || gps.status === 'pinned'
                   ? 'border-gold/30 bg-gold/10 text-gold-soft'
                   : 'border-ivory/10 bg-void/40 text-soft/80'
               }`}
             >
-              {gpsLabel}
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <span>{gpsLabel}</span>
+                {gps.status !== 'ok' && (
+                  <button
+                    type="button"
+                    onClick={retryGps}
+                    className="rounded-full border border-ivory/20 px-3 py-1 text-[10px] tracking-[0.16em] uppercase"
+                  >
+                    Retry GPS
+                  </button>
+                )}
+              </div>
             </div>
+
+            {(showPicker || gps.status === 'pending') && gps.status !== 'ok' && (
+              <LocationPicker
+                lat={gps.lat}
+                lng={gps.lng}
+                onPick={(lat, lng) => {
+                  setGps({
+                    lat,
+                    lng,
+                    accuracy: null,
+                    status: 'pinned',
+                  })
+                }}
+              />
+            )}
 
             <label className="block space-y-2">
               <span className="text-[10px] tracking-[0.22em] text-muted uppercase">Notes</span>
@@ -278,13 +442,7 @@ export default function ReportPage() {
             </button>
 
             <p className="text-center text-[10px] tracking-[0.18em] text-muted uppercase">
-              <a href="http://localhost:3001/lawbot" className="hover:text-gold">
-                Legal help
-              </a>
-              <span className="mx-2">·</span>
-              <a href="http://localhost:3001/therapybot" className="hover:text-gold">
-                Support chat
-              </a>
+              Legal &amp; therapy agents unlock after you place the order
             </p>
           </form>
         )}

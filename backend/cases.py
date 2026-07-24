@@ -141,6 +141,12 @@ def create_case(payload: CaseCreate, evidence_meta: list[dict[str, str]]) -> dic
         'status': 'open',
         'routing': routing,
         'escalation_contacts': escalation_contacts(routing),
+        'risk_score': None,
+        'risk_tier': None,
+        'agent_plan': [],
+        'agent_log': [],
+        'privacy': {'redacted_preview': False, 'contact_visible_to': 'admin'},
+        'secure_channel': {},
         'created_at': utc_now(),
         'updated_at': utc_now(),
         # Shape compatible with older admin dashboard fields
@@ -152,10 +158,73 @@ def create_case(payload: CaseCreate, evidence_meta: list[dict[str, str]]) -> dic
         'Current Situation': payload.notes.strip(),
         'state': (payload.location or '').strip() or 'Unknown',
     }
+
+    from backend.orchestration.engine import run_orchestration, survivor_summary
+
+    case = run_orchestration(case, trigger='create')
+    summary = survivor_summary(case)
+
+    # Persist without one-time plaintext token
+    persist = {k: v for k, v in case.items() if not k.startswith('_')}
     cases = _load_cases()
-    cases.insert(0, case)
+    cases.insert(0, persist)
     _save_cases(cases)
-    return case
+
+    # Return case plus orchestration fields for the survivor UI
+    out = dict(persist)
+    out['orchestration_summary'] = summary
+    if summary.get('secure_token'):
+        out['secure_token'] = summary['secure_token']
+    return out
+
+
+def find_case_by_secure_token(token: str) -> Optional[dict[str, Any]]:
+    from backend.orchestration.privacy import verify_secure_token
+
+    for case in _load_cases():
+        sc = case.get('secure_channel') or {}
+        if verify_secure_token(token, sc.get('token_hash') or ''):
+            return case
+    return None
+
+
+def append_secure_message(
+    case_id: str, body: str, *, sender: str = 'admin'
+) -> Optional[dict[str, Any]]:
+    from backend.orchestration.privacy import encrypt_text
+
+    cases = _load_cases()
+    for i, case in enumerate(cases):
+        if case.get('id') != case_id:
+            continue
+        sc = dict(case.get('secure_channel') or {})
+        messages = list(sc.get('messages') or [])
+        messages.append(
+            {
+                'id': str(uuid.uuid4()),
+                'sender': sender,
+                'body_encrypted': encrypt_text(body.strip()),
+                'at': utc_now(),
+            }
+        )
+        sc['messages'] = messages
+        case['secure_channel'] = sc
+        case['updated_at'] = utc_now()
+        cases[i] = case
+        _save_cases(cases)
+        return case
+    return None
+
+
+def reorchestrate_case(case_id: str) -> Optional[dict[str, Any]]:
+    from backend.orchestration.engine import run_orchestration
+
+    case = get_case(case_id)
+    if not case:
+        return None
+    case = run_orchestration(case, trigger='reorchestrate')
+    persist = {k: v for k, v in case.items() if not k.startswith('_')}
+    return update_case(case_id, **{k: v for k, v in persist.items() if k != 'id'})
 
 
 def list_cases() -> list[dict[str, Any]]:

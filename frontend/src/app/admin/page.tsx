@@ -8,6 +8,9 @@ import {
   API_BASE,
   SITE,
 } from '@/lib/constants'
+import { AgentTimeline, AgentLogItem, AgentPlanItem } from '@/components/agents/AgentTimeline'
+import { AgentChat } from '@/components/agents/AgentChat'
+import { SecureMessageForm } from '@/components/agents/SecureMessageForm'
 
 const CasesMap = dynamic(
   () => import('@/components/admin/CasesMap').then((m) => m.CasesMap),
@@ -34,8 +37,16 @@ type CaseRow = {
   location_updated_at?: string | null
   status: string
   routing: 'admin' | 'ngo' | 'police'
+  risk_score?: number | null
+  risk_tier?: string | null
   escalation_contacts?: Record<string, string>
   evidence?: { filename: string; stored_as: string }[]
+  agent_plan?: AgentPlanItem[]
+  agent_log?: AgentLogItem[]
+  legal_brief?: { answer?: string }
+  therapy_brief?: { answer?: string }
+  notify_status?: string
+  privacy?: { redacted_preview?: boolean }
   created_at: string
 }
 
@@ -57,8 +68,12 @@ function sortByPriority(cases: CaseRow[]) {
     const openA = a.status === 'open' ? 0 : 1
     const openB = b.status === 'open' ? 0 : 1
     if (openA !== openB) return openA - openB
-    const s = (SEVERITY_RANK[a.severity] ?? 9) - (SEVERITY_RANK[b.severity] ?? 9)
-    if (s !== 0) return s
+    if (typeof a.risk_score === 'number' && typeof b.risk_score === 'number') {
+      if (b.risk_score !== a.risk_score) return b.risk_score - a.risk_score
+    } else {
+      const s = (SEVERITY_RANK[a.severity] ?? 9) - (SEVERITY_RANK[b.severity] ?? 9)
+      if (s !== 0) return s
+    }
     const f = (FREQUENCY_RANK[a.frequency] ?? 9) - (FREQUENCY_RANK[b.frequency] ?? 9)
     if (f !== 0) return f
     return new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
@@ -72,34 +87,57 @@ export default function AdminPage() {
   const [selected, setSelected] = useState<CaseRow | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
-  const [liveAt, setLiveAt] = useState<string>('')
+  const [liveAt, setLiveAt] = useState('')
+  const [liveMode, setLiveMode] = useState<'sse' | 'poll'>('poll')
 
-  const loadCases = useCallback(async (key: string, quiet = false) => {
-    if (!quiet) setLoading(true)
-    setError('')
-    try {
-      const res = await fetch(`${API_BASE}/cases`, {
-        headers: { 'X-Admin-Key': key },
-      })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        setError(typeof data.detail === 'string' ? data.detail : 'Unauthorized')
-        setCases([])
-        return
-      }
-      const next = sortByPriority(data.cases || [])
-      setCases(next)
-      setLiveAt(new Date().toLocaleTimeString())
-      setSelected((prev) => {
-        if (!prev) return prev
-        return next.find((c) => c.id === prev.id) || prev
-      })
-    } catch {
-      setError('Backend unreachable')
-    } finally {
-      if (!quiet) setLoading(false)
-    }
+  const applyCases = useCallback((list: CaseRow[]) => {
+    const next = sortByPriority(list)
+    setCases(next)
+    setLiveAt(new Date().toLocaleTimeString())
+    setSelected((prev) => {
+      if (!prev) return prev
+      return next.find((c) => c.id === prev.id) || prev
+    })
   }, [])
+
+  const loadCases = useCallback(
+    async (key: string, quiet = false) => {
+      if (!quiet) setLoading(true)
+      setError('')
+      try {
+        const res = await fetch(`${API_BASE}/cases`, {
+          headers: { 'X-Admin-Key': key },
+        })
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok) {
+          setError(typeof data.detail === 'string' ? data.detail : 'Unauthorized')
+          setCases([])
+          return
+        }
+        applyCases(data.cases || [])
+      } catch {
+        setError('Backend unreachable')
+      } finally {
+        if (!quiet) setLoading(false)
+      }
+    },
+    [applyCases],
+  )
+
+  const openCase = useCallback(
+    async (id: string, key: string) => {
+      try {
+        const res = await fetch(`${API_BASE}/cases/${id}`, {
+          headers: { 'X-Admin-Key': key },
+        })
+        const data = await res.json().catch(() => ({}))
+        if (res.ok) setSelected(data)
+      } catch {
+        /* keep list row */
+      }
+    },
+    [],
+  )
 
   useEffect(() => {
     const saved = sessionStorage.getItem(ADMIN_KEY_STORAGE)
@@ -109,13 +147,44 @@ export default function AdminPage() {
     }
   }, [loadCases])
 
+  // Prefer SSE; fall back to 5s poll
   useEffect(() => {
     if (!adminKey) return
-    const id = window.setInterval(() => {
-      void loadCases(adminKey, true)
-    }, 5000)
-    return () => window.clearInterval(id)
-  }, [adminKey, loadCases])
+
+    let cancelled = false
+    let pollId: number | undefined
+    const es = new EventSource(
+      `${API_BASE}/cases/stream?admin_key_q=${encodeURIComponent(adminKey)}`,
+    )
+
+    es.onmessage = (ev) => {
+      if (cancelled) return
+      try {
+        const data = JSON.parse(ev.data)
+        applyCases(data.cases || [])
+        setLiveMode('sse')
+      } catch {
+        /* ignore */
+      }
+    }
+
+    es.onerror = () => {
+      if (cancelled) return
+      es.close()
+      setLiveMode('poll')
+      if (!pollId) {
+        pollId = window.setInterval(() => {
+          void loadCases(adminKey, true)
+        }, 5000)
+      }
+    }
+
+    return () => {
+      cancelled = true
+      es.close()
+      if (pollId) window.clearInterval(pollId)
+    }
+  }, [adminKey, applyCases, loadCases])
 
   const sorted = useMemo(() => sortByPriority(cases), [cases])
 
@@ -158,6 +227,22 @@ export default function AdminPage() {
     void loadCases(adminKey, true)
   }
 
+  async function reorchestrate() {
+    if (!selected || !adminKey) return
+    const res = await fetch(`${API_BASE}/orchestrate/${selected.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ admin_key: adminKey }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      setError(typeof data.detail === 'string' ? data.detail : 'Orchestrate failed')
+      return
+    }
+    setSelected(data.case)
+    void loadCases(adminKey, true)
+  }
+
   if (!adminKey) {
     return (
       <main className="flex min-h-[100svh] items-center justify-center bg-void px-6 text-ivory">
@@ -189,10 +274,12 @@ export default function AdminPage() {
       <div className="mx-auto max-w-7xl px-6 py-10 md:px-10">
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
-            <p className="text-[10px] tracking-[0.28em] text-gold uppercase">Live admin</p>
+            <p className="text-[10px] tracking-[0.28em] text-gold uppercase">
+              Live admin · {liveMode === 'sse' ? 'SSE' : 'poll'}
+            </p>
             <h1 className="font-display mt-2 text-4xl">Priority queue + map</h1>
             <p className="mt-2 text-sm text-soft/70">
-              Sorted critical → high → medium → low
+              Risk-sorted crisis orchestration
               {liveAt ? ` · refreshed ${liveAt}` : ''}
             </p>
           </div>
@@ -218,10 +305,10 @@ export default function AdminPage() {
 
         <div className="mt-8 grid gap-6 lg:grid-cols-2">
           <div className="overflow-x-auto rounded-[1.25rem] border border-ivory/10">
-            <table className="w-full min-w-[560px] text-left text-sm">
+            <table className="w-full min-w-[620px] text-left text-sm">
               <thead className="border-b border-ivory/10 bg-panel/80 text-[10px] tracking-[0.18em] text-muted uppercase">
                 <tr>
-                  <th className="px-4 py-3">Priority</th>
+                  <th className="px-4 py-3">Risk</th>
                   <th className="px-4 py-3">Name</th>
                   <th className="px-4 py-3">Routing</th>
                   <th className="px-4 py-3">GPS</th>
@@ -232,18 +319,27 @@ export default function AdminPage() {
                 {sorted.map((c) => (
                   <tr
                     key={c.id}
-                    onClick={() => setSelected(c)}
+                    onClick={() => {
+                      void openCase(c.id, adminKey)
+                    }}
                     className={`cursor-pointer border-b border-ivory/5 hover:bg-panel/60 ${
                       selected?.id === c.id ? 'bg-gold/10' : c.routing !== 'admin' ? 'bg-gold/5' : ''
                     }`}
                   >
                     <td className="px-4 py-3">
-                      <span className="uppercase">{c.severity}</span>
+                      <span className="uppercase text-gold">
+                        {c.risk_tier || c.severity}
+                      </span>
                       <span className="mt-1 block text-[10px] tracking-[0.14em] text-muted uppercase">
-                        {c.frequency}
+                        {c.risk_score != null ? `${c.risk_score}/100` : c.frequency}
                       </span>
                     </td>
-                    <td className="px-4 py-3">{c.name}</td>
+                    <td className="px-4 py-3">
+                      {c.name}
+                      {c.privacy?.redacted_preview && (
+                        <span className="mt-1 block text-[10px] text-muted">redacted</span>
+                      )}
+                    </td>
                     <td className="px-4 py-3">
                       <span
                         className={`rounded-full px-2.5 py-1 text-[10px] tracking-[0.14em] uppercase ${
@@ -279,8 +375,7 @@ export default function AdminPage() {
               cases={sorted}
               selectedId={selected?.id}
               onSelect={(id) => {
-                const found = sorted.find((c) => c.id === id)
-                if (found) setSelected(found)
+                void openCase(id, adminKey)
               }}
             />
             <p className="mt-2 text-[10px] tracking-[0.16em] text-muted uppercase">
@@ -290,13 +385,19 @@ export default function AdminPage() {
         </div>
 
         {selected && (
-          <div className="glass mt-8 rounded-[1.5rem] p-7">
+          <div className="glass mt-8 space-y-6 rounded-[1.5rem] p-7">
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div>
                 <p className="text-[10px] tracking-[0.22em] text-gold uppercase">Case detail</p>
                 <h2 className="font-display mt-2 text-3xl">{selected.name}</h2>
                 <p className="mt-1 text-sm text-soft/70">
                   {selected.location || 'No area label'} · {selected.phone || 'No phone'}
+                </p>
+                <p className="mt-2 text-sm text-gold-soft">
+                  Risk {selected.risk_tier || selected.severity}
+                  {selected.risk_score != null ? ` (${selected.risk_score}/100)` : ''} · routed{' '}
+                  {selected.routing}
+                  {selected.notify_status ? ` · ${selected.notify_status}` : ''}
                 </p>
                 {typeof selected.lat === 'number' && typeof selected.lng === 'number' ? (
                   <p className="mt-2 text-sm text-gold-soft">
@@ -326,10 +427,10 @@ export default function AdminPage() {
               </button>
             </div>
 
-            <p className="mt-6 whitespace-pre-wrap text-sm text-soft/90">{selected.notes}</p>
+            <p className="whitespace-pre-wrap text-sm text-soft/90">{selected.notes}</p>
 
             {!!selected.evidence?.length && (
-              <ul className="mt-4 space-y-1 text-sm text-soft/70">
+              <ul className="space-y-1 text-sm text-soft/70">
                 {selected.evidence.map((ev) => (
                   <li key={ev.stored_as}>📎 {ev.filename}</li>
                 ))}
@@ -337,12 +438,40 @@ export default function AdminPage() {
             )}
 
             {selected.escalation_contacts?.primary && (
-              <p className="mt-5 rounded-2xl border border-gold/25 bg-gold/10 px-4 py-3 text-sm text-gold-soft">
+              <p className="rounded-2xl border border-gold/25 bg-gold/10 px-4 py-3 text-sm text-gold-soft">
                 Contact: {selected.escalation_contacts.primary}
               </p>
             )}
 
-            <div className="mt-6 flex flex-wrap gap-3">
+            <AgentTimeline plan={selected.agent_plan} log={selected.agent_log} />
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <AgentChat
+                caseId={selected.id}
+                kind="legal"
+                auth={{ adminKey }}
+              />
+              <AgentChat
+                caseId={selected.id}
+                kind="therapy"
+                auth={{ adminKey }}
+              />
+            </div>
+
+            <SecureMessageForm
+              caseId={selected.id}
+              adminKey={adminKey}
+              onSent={() => void openCase(selected.id, adminKey)}
+            />
+
+            <div className="flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={() => void reorchestrate()}
+                className="rounded-full border border-gold/40 px-5 py-2.5 text-[10px] tracking-[0.2em] text-gold uppercase"
+              >
+                Re-orchestrate
+              </button>
               <button
                 type="button"
                 onClick={() => escalate('ngo')}

@@ -30,6 +30,10 @@ export function CasesMap({ cases, selectedId, onSelect }: Props) {
   const mapRef = useRef<LeafletMap | null>(null)
   const markersRef = useRef<Marker[]>([])
 
+  const withCoords = cases.filter(
+    (c) => typeof c.lat === 'number' && typeof c.lng === 'number',
+  )
+
   useEffect(() => {
     let cancelled = false
 
@@ -49,6 +53,8 @@ export function CasesMap({ cases, selectedId, onSelect }: Props) {
         maxZoom: 19,
       }).addTo(map)
       mapRef.current = map
+      window.setTimeout(() => map.invalidateSize(), 100)
+      window.setTimeout(() => map.invalidateSize(), 400)
     }
 
     void init()
@@ -65,16 +71,17 @@ export function CasesMap({ cases, selectedId, onSelect }: Props) {
       const map = mapRef.current
       if (!map) return
       const L = (await import('leaflet')).default
+      map.invalidateSize()
 
       markersRef.current.forEach((m) => m.remove())
       markersRef.current = []
 
-      const withCoords = cases.filter(
+      const points = cases.filter(
         (c) => typeof c.lat === 'number' && typeof c.lng === 'number',
       )
 
       const bounds: [number, number][] = []
-      for (const c of withCoords) {
+      for (const c of points) {
         const color = SEVERITY_COLOR[c.severity] || '#d4a574'
         const isSelected = c.id === selectedId
         const icon = L.divIcon({
@@ -108,9 +115,18 @@ export function CasesMap({ cases, selectedId, onSelect }: Props) {
     void syncMarkers()
   }, [cases, selectedId, onSelect])
 
+  const hasCoords = cases.some(
+    (c) => typeof c.lat === 'number' && typeof c.lng === 'number',
+  )
+
   return (
     <div className="overflow-hidden rounded-[1.25rem] border border-ivory/10">
       <div ref={containerRef} className="h-[360px] w-full md:h-[480px]" />
+      {!hasCoords && (
+        <p className="border-t border-ivory/10 bg-void/40 px-4 py-3 text-xs text-muted">
+          No live coordinates yet — survivors must allow location or drop a pin on the report map.
+        </p>
+      )}
     </div>
   )
 }

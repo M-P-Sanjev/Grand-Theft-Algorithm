@@ -43,3 +43,18 @@ class EscalateBody(BaseModel):
 
 class AdminKeyBody(BaseModel):
     admin_key: str
+
+
+class AgentQuestionBody(BaseModel):
+    question: str = ''
+    admin_key: Optional[str] = None
+    token: Optional[str] = None  # passport or secure channel token for survivors
+
+
+class SecureMessageBody(BaseModel):
+    admin_key: str
+    message: str
+
+
+class SecureReplyBody(BaseModel):
+    message: str
