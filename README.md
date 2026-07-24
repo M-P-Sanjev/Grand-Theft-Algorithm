@@ -73,7 +73,7 @@ This core (cover → private vault → trusted relay → human console) can late
 | Layer | Technology |
 |-------|------------|
 | Frontend | Next.js, React |
-| Backend | Python 3.12, FastAPI, Pydantic |
+| Backend | Python 3.12, FastAPI |
 | Database | MongoDB Atlas |
 | Auth (NGO) | Secure staff auth for console access |
 | AI / ML | LLM + embeddings, RAG, severity assist |
