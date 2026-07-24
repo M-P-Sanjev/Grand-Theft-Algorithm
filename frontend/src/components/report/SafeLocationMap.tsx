@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { Map as LeafletMap, Marker, Circle } from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import type { PlaceHit } from '@/lib/geo'
@@ -20,6 +20,9 @@ export function SafeLocationMap({ lat, lng, places = [], hideExact, onPick }: Pr
   const markerRef = useRef<Marker | null>(null)
   const circleRef = useRef<Circle | null>(null)
   const placeMarkers = useRef<Marker[]>([])
+  // mapReady flips to true once async Leaflet import completes so that the
+  // lat/lng sync effect re-runs and actually draws the user's position.
+  const [mapReady, setMapReady] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -46,6 +49,7 @@ export function SafeLocationMap({ lat, lng, places = [], hideExact, onPick }: Pr
       mapRef.current = map
       window.setTimeout(() => map.invalidateSize(), 80)
       window.setTimeout(() => map.invalidateSize(), 320)
+      setMapReady(true)
     }
     void init()
     return () => {
@@ -115,7 +119,7 @@ export function SafeLocationMap({ lat, lng, places = [], hideExact, onPick }: Pr
       map.invalidateSize()
     }
     void sync()
-  }, [lat, lng, places, hideExact])
+  }, [lat, lng, places, hideExact, mapReady])
 
   return (
     <div className="haven-map overflow-hidden rounded-2xl border border-ivory/10">

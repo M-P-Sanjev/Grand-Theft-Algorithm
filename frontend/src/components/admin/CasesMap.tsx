@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { Map as LeafletMap, Marker } from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 
@@ -34,6 +34,9 @@ export function CasesMap({ cases, selectedId, onSelect }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const mapRef = useRef<LeafletMap | null>(null)
   const markersRef = useRef<Marker[]>([])
+  // mapReady flips to true once the async Leaflet import finishes so that
+  // syncMarkers re-runs even when cases arrive before the map initializes.
+  const [mapReady, setMapReady] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -57,6 +60,7 @@ export function CasesMap({ cases, selectedId, onSelect }: Props) {
       mapRef.current = map
       window.setTimeout(() => map.invalidateSize(), 100)
       window.setTimeout(() => map.invalidateSize(), 400)
+      setMapReady(true)
     }
 
     void init()
@@ -68,6 +72,7 @@ export function CasesMap({ cases, selectedId, onSelect }: Props) {
     }
   }, [])
 
+  // Re-run whenever cases, selection, or map readiness changes.
   useEffect(() => {
     async function syncMarkers() {
       const map = mapRef.current
@@ -125,7 +130,7 @@ export function CasesMap({ cases, selectedId, onSelect }: Props) {
     }
 
     void syncMarkers()
-  }, [cases, selectedId, onSelect])
+  }, [cases, selectedId, onSelect, mapReady])
 
   const hasCoords = cases.some(
     (c) => typeof c.lat === 'number' && typeof c.lng === 'number',

@@ -82,6 +82,18 @@ def _require_admin(key: str) -> None:
         raise HTTPException(status_code=401, detail='Unauthorized')
 
 
+def _authorize_agent(body_admin: str | None, body_token: str | None) -> bool:
+    """Allow either an admin key or a valid survivor passport/secure token."""
+    if body_admin and body_admin == admin_key():
+        return True
+    if body_token and (
+        consume_or_check_token(body_token, consume=False)
+        or find_case_by_secure_token(body_token)
+    ):
+        return True
+    return False
+
+
 @app.get('/health')
 async def health():
     return {'ok': True, 'mode': 'sos', 'orchestration': True}
@@ -499,16 +511,6 @@ async def ask_therapy(case_id: str, body: AgentQuestionBody):
     )
     return result
 
-
-def _authorize_agent(body_admin: str | None, body_token: str | None) -> bool:
-    if body_admin and body_admin == admin_key():
-        return True
-    if body_token and (
-        consume_or_check_token(body_token, consume=False)
-        or find_case_by_secure_token(body_token)
-    ):
-        return True
-    return False
 
 
 @app.post('/cases/{case_id}/agents/{kind}/stream')
