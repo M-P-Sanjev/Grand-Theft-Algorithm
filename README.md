@@ -24,11 +24,9 @@ Safra is a discreet safety platform for survivors in monitored or abusive enviro
 
 | Name | Role |
 |------|------|
-| *(add member)* | |
-| *(add member)* | |
-| *(add member)* | |
-| *(add member)* | |
-| *(add member)* | |
+| *(Dharshan Sathish Kumar)* | |
+| *(Sanjev M P)* | |
+| *(Chris Bastian Roy)* | |
 
 ---
 
