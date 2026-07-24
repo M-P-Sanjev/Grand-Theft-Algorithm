@@ -44,7 +44,7 @@ About **1 in 3 women** face violence globally; ~**30% in India** report domestic
 **Frontend:** Next.js, TypeScript, Tailwind  
 **Backend:** FastAPI, MongoDB Atlas  
 **AI:** RAG (legal/helpline docs), LLM, severity ML assist  
-**Auth:** Clerk (NGO staff)
+
 
 ```text
 Cover UI → Safe Mode (vault / RAG / relay) → FastAPI → MongoDB → NGO Console
