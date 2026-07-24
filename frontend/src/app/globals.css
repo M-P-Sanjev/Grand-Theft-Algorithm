@@ -1,0 +1,129 @@
+@import 'tailwindcss';
+
+@theme {
+  /* Theme 1 — Rooftop Night */
+  --color-void: #060504;
+  --color-card: #100e0c;
+  --color-panel: #161310;
+  --color-gold: #d4a574;
+  --color-gold-soft: #e8c49a;
+  --color-amber: #ffb060;
+  --color-cyan: #d4a574; /* alias → warm gold so old cyan classes match theme */
+  --color-ivory: #f3eee6;
+  --color-muted: #8a8076;
+  --color-soft: #c9bfb2;
+  --font-display: var(--font-cormorant), 'Times New Roman', serif;
+  --font-body: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --ease-apple: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    background: var(--color-void);
+    color: var(--color-ivory);
+  }
+
+  html.lenis,
+  html.lenis body {
+    height: auto;
+  }
+
+  .lenis.lenis-smooth {
+    scroll-behavior: auto !important;
+  }
+
+  .lenis.lenis-stopped {
+    overflow: hidden;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--color-void);
+    color: var(--color-ivory);
+    font-family: var(--font-body);
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow-x: clip;
+    cursor: auto;
+  }
+
+  a,
+  button,
+  [data-magnetic] {
+    cursor: pointer;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--color-gold) 35%, transparent);
+    color: var(--color-ivory);
+  }
+
+  img {
+    max-width: 100%;
+    display: block;
+  }
+
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+}
+
+@layer utilities {
+  .font-display {
+    font-family: var(--font-display);
+  }
+
+  .font-body {
+    font-family: var(--font-body);
+  }
+
+  .grain {
+    pointer-events: none;
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    opacity: 0.04;
+    mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  .vignette {
+    pointer-events: none;
+    position: fixed;
+    inset: 0;
+    z-index: 85;
+    background: radial-gradient(
+      ellipse at center,
+      transparent 38%,
+      rgba(6, 5, 4, 0.72) 100%
+    );
+  }
+
+  .glass {
+    background: rgba(16, 14, 12, 0.62);
+    border: 1px solid rgba(212, 165, 116, 0.1);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+  }
+
+  .glow-cyan,
+  .glow-gold {
+    box-shadow: 0 0 36px rgba(212, 165, 116, 0.22);
+  }
+
+  .rooftop-wash {
+    background: radial-gradient(
+      ellipse at 20% 40%,
+      rgba(255, 176, 96, 0.12),
+      transparent 50%
+    );
+  }
+}
