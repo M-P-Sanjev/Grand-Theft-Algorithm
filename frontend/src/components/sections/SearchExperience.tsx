@@ -8,7 +8,13 @@ export function SearchExperience() {
   const { query, setQuery, category, setCategory, playClick } = useApp()
   const [focused, setFocused] = useState(false)
 
-  const chips = useMemo(() => CATEGORIES.slice(0, 10), [])
+  const chips = useMemo(() => {
+    const preferred = CATEGORIES.filter((c) =>
+      ['soft-drinks', 'pizza', 'burger', 'ramen', 'coffee', 'desserts'].includes(c.id),
+    )
+    const rest = CATEGORIES.filter((c) => !preferred.find((p) => p.id === c.id))
+    return [...preferred, ...rest].slice(0, 12)
+  }, [])
 
   return (
     <section id="search" className="relative z-10 py-16 md:py-20">

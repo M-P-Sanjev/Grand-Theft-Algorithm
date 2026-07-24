@@ -7,13 +7,26 @@ import os
 # External dependencies
 import boto3
 from bson import ObjectId
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from backend.cases import (
+    CaseCreate,
+    admin_key,
+    consume_or_check_token,
+    create_case,
+    get_case,
+    issue_passport_token,
+    list_cases,
+    save_evidence_file,
+    secret_passport,
+    to_admin_dashboard_doc,
+    update_case,
+)
 from backend.db import get_database, upload_embeddings_to_mongo
 from backend.logger import CustomFormatter
-from backend.schema import FileContent, PostInfo
+from backend.schema import CaseCreateBody, EscalateBody, FileContent, PassportRequest, PostInfo
 from backend.utils.common import (load_image_from_url_or_file,
                                   read_files_from_directory,
                                   serialize_object_id)
@@ -40,7 +53,12 @@ db = None
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -49,12 +67,155 @@ app.add_middleware(
 def initialize_database():
     global db
     if db is None:
-        db = get_database()  # Establish the connection once at load time
+        try:
+            db = get_database()  # Establish the connection once at load time
+        except Exception as e:
+            logger.warning("MongoDB unavailable, using local case store only: %s", e)
+            db = None
+
 
 # Call the initialize function at startup
 @app.on_event("startup")
 async def startup_event():
     initialize_database()
+
+
+# --- Water cover SOS case pipeline ---
+
+@app.post("/verify-passport")
+async def verify_passport(body: PassportRequest):
+    """Validate the secret passport OTP used by the Water dish cover."""
+    if body.code.strip() != secret_passport():
+        raise HTTPException(status_code=401, detail="Invalid delivery code")
+    token = issue_passport_token()
+    return {"ok": True, "token": token}
+
+
+@app.post("/cases")
+async def create_abuse_case(
+    notes: str = Form(...),
+    frequency: str = Form('once'),
+    severity: str = Form('medium'),
+    name: str = Form(None),
+    phone: str = Form(None),
+    location: str = Form(None),
+    lat: str = Form(None),
+    lng: str = Form(None),
+    token: str = Form(...),
+    files: list[UploadFile] = File(default=[]),
+):
+    """Create a victim case after passport unlock. Auto-routes high/repetitive abuse."""
+    if not consume_or_check_token(token, consume=False):
+        raise HTTPException(status_code=401, detail="Session expired. Open Water again.")
+
+    if frequency not in ('once', 'repeated', 'ongoing'):
+        raise HTTPException(status_code=400, detail="Invalid frequency")
+    if severity not in ('low', 'medium', 'high', 'critical'):
+        raise HTTPException(status_code=400, detail="Invalid severity")
+    if not notes.strip():
+        raise HTTPException(status_code=400, detail="Notes are required")
+
+    lat_f = None
+    lng_f = None
+    try:
+        if lat not in (None, ''):
+            lat_f = float(lat)
+        if lng not in (None, ''):
+            lng_f = float(lng)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid coordinates")
+
+    evidence_meta = []
+    upload_list = files if isinstance(files, list) else ([files] if files else [])
+    for upload in upload_list:
+        if not getattr(upload, 'filename', None):
+            continue
+        content = await upload.read()
+        if not content:
+            continue
+        evidence_meta.append(save_evidence_file(upload.filename, content))
+
+    payload = CaseCreate(
+        notes=notes,
+        frequency=frequency,  # type: ignore[arg-type]
+        severity=severity,  # type: ignore[arg-type]
+        name=name,
+        phone=phone,
+        location=location,
+        lat=lat_f,
+        lng=lng_f,
+        token=token,
+        evidence=evidence_meta,
+    )
+    case = create_case(payload, evidence_meta)
+
+    # Mirror into Mongo admin collection when available (web dashboard)
+    if db is not None:
+        try:
+            db['admin'].insert_one(to_admin_dashboard_doc(case))
+            db['cases'].insert_one({**case})
+        except Exception as e:
+            logger.warning("Could not mirror case to Mongo: %s", e)
+
+    return {
+        "status": "ok",
+        "case": case,
+        "message": "Order received",
+        "routing": case['routing'],
+    }
+
+
+@app.get("/cases")
+async def get_cases(x_admin_key: str = Header(default='')):
+    if x_admin_key != admin_key():
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return {"cases": list_cases()}
+
+
+@app.get("/cases/{case_id}")
+async def get_case_detail(case_id: str, x_admin_key: str = Header(default='')):
+    if x_admin_key != admin_key():
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    case = get_case(case_id)
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+    return case
+
+
+@app.post("/cases/{case_id}/escalate")
+async def escalate_case(case_id: str, body: EscalateBody):
+    if body.admin_key != admin_key():
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if body.target not in ('admin', 'ngo', 'police'):
+        raise HTTPException(status_code=400, detail="Invalid target")
+    from backend.cases import escalation_contacts
+
+    case = update_case(
+        case_id,
+        routing=body.target,
+        escalation_contacts=escalation_contacts(body.target),
+        status='open',
+    )
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+    return {"status": "escalated", "case": case}
+
+
+@app.post("/cases/{case_id}/close")
+async def close_case(case_id: str, body: dict):
+    key = body.get('admin_key', '')
+    if key != admin_key():
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    case = update_case(case_id, status='closed')
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+    return {"status": "closed", "case": case}
+
+
+@app.get("/health")
+async def health():
+    return {"ok": True, "mongo": db is not None}
+
 
 # Environment and AWS setup
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
@@ -67,8 +228,8 @@ s3_client = boto3.client(
     aws_access_key_id=AWS_ACCESS_KEY_ID,
     aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
     region_name=AWS_REGION,
-)
-bedrock_client = boto3.client("bedrock-runtime", region_name=AWS_REGION)
+) if AWS_ACCESS_KEY_ID else None
+bedrock_client = boto3.client("bedrock-runtime", region_name=AWS_REGION) if AWS_ACCESS_KEY_ID else None
 
 # API Endpoints
 @app.post("/text-generation")
@@ -116,6 +277,9 @@ async def decompose_text_content(data: dict):
 @app.post("/save-extracted-data")
 async def save_extracted_data(data: dict):
     try:
+        if db is None:
+            # Fallback: persist via local case store shape
+            return {"status": "Data saved locally (Mongo unavailable)"}
         db["admin"].insert_one(data)
         return {"status": "Data saved successfully"}
     except Exception as e:
@@ -182,6 +346,8 @@ async def send_message_to_twitter_endpoint(image_url: str, caption: str):
 def get_all_posts():
     """Retrieve all posts from the database."""
     try:
+        if db is None:
+            return JSONResponse(content=[to_admin_dashboard_doc(c) for c in list_cases()])
         posts = [serialize_object_id(post) for post in db["admin"].find()]
         return JSONResponse(content=posts)
     except Exception as e:

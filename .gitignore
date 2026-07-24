@@ -4,6 +4,8 @@ __pycache__/
 *.pyc
 backend/.env
 backend/encoded_image.png
+backend/uploads/
+backend/data/
 google-api.json
 
 # Node / Next

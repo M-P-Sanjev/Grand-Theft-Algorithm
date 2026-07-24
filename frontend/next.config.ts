@@ -10,7 +10,7 @@ const nextConfig: NextConfig = {
       },
     ],
   },
-  transpilePackages: ['three'],
+  transpilePackages: [],
 }
 
 export default nextConfig

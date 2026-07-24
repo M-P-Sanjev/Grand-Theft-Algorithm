@@ -166,6 +166,7 @@ export type MenuItem = {
   chefPick: boolean
   img: string
   desc: string
+  secretEntry?: boolean
 }
 
 function buildMenu(): MenuItem[] {
@@ -210,7 +211,28 @@ function buildMenu(): MenuItem[] {
   return items
 }
 
-export const MENU: MenuItem[] = buildMenu()
+/** Cover dish — looks like a normal menu item; unlocks the secret SOS report flow. */
+export const WATER_ITEM: MenuItem = {
+  id: 'water',
+  name: 'Water',
+  category: 'soft-drinks',
+  price: 2,
+  rating: 4.9,
+  time: 5,
+  calories: 0,
+  chefPick: false,
+  secretEntry: true,
+  img: 'https://images.unsplash.com/photo-1548839140-29a749e1cf4d?auto=format&fit=crop&w=1600&q=90',
+  desc: 'Still water · chilled',
+}
+
+export const MENU: MenuItem[] = [WATER_ITEM, ...buildMenu()]
+
+export const API_BASE =
+  process.env.NEXT_PUBLIC_BACKEND_URL?.replace(/\/$/, '') || 'http://127.0.0.1:8000'
+
+export const PASSPORT_TOKEN_KEY = 'safra_passport_token'
+export const ADMIN_KEY_STORAGE = 'safra_admin_key'
 
 export const SUGGESTIONS = [
   'Truffle burgers near me',
