@@ -116,7 +116,7 @@ def run_orchestration(case: dict[str, Any], *, trigger: str = 'create') -> dict[
         message=case.get('notes') or 'I need support',
         severity=sev_pack,
         safety=safety,
-        memory=get_memory(case.get('id') or ''),
+        memory=get_memory(case.get('id') or '', 'therapy'),
         name=case.get('name'),
     )
     case['therapy_brief'] = {

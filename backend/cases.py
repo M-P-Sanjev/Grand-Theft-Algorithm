@@ -18,9 +18,42 @@ CaseStatus = Literal['open', 'closed']
 DATA_DIR = Path(__file__).resolve().parent / 'data'
 UPLOAD_DIR = Path(__file__).resolve().parent / 'uploads'
 CASES_FILE = DATA_DIR / 'cases.json'
+PASSPORT_TOKENS_FILE = DATA_DIR / 'passport_tokens.json'
 
-# Short-lived passport session tokens (demo; in-memory)
+# Passport session tokens — loaded from disk so uvicorn --reload does not kill Guardian POSTs
 PASSPORT_TOKENS: set[str] = set()
+
+
+def _load_passport_tokens() -> set[str]:
+    ensure_dirs()
+    if not PASSPORT_TOKENS_FILE.exists():
+        return set()
+    try:
+        raw = json.loads(PASSPORT_TOKENS_FILE.read_text(encoding='utf-8'))
+        if isinstance(raw, list):
+            return {str(t) for t in raw if t}
+        if isinstance(raw, dict):
+            return {str(t) for t in (raw.get('tokens') or []) if t}
+    except Exception:
+        return set()
+    return set()
+
+
+def _save_passport_tokens() -> None:
+    ensure_dirs()
+    PASSPORT_TOKENS_FILE.write_text(
+        json.dumps({'tokens': sorted(PASSPORT_TOKENS)}, indent=2),
+        encoding='utf-8',
+    )
+
+
+def ensure_dirs() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# Load durable tokens at import (after ensure_dirs is defined)
+PASSPORT_TOKENS.update(_load_passport_tokens())
 
 
 class PassportRequest(BaseModel):
@@ -90,11 +123,6 @@ def escalation_contacts(routing: Routing) -> dict[str, str]:
     return contacts
 
 
-def ensure_dirs() -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
-
 def _load_cases() -> list[dict[str, Any]]:
     ensure_dirs()
     if not CASES_FILE.exists():
@@ -113,15 +141,58 @@ def _save_cases(cases: list[dict[str, Any]]) -> None:
 def issue_passport_token() -> str:
     token = secrets.token_urlsafe(24)
     PASSPORT_TOKENS.add(token)
+    _save_passport_tokens()
     return token
 
 
 def consume_or_check_token(token: str, consume: bool = False) -> bool:
+    if not token:
+        return False
+    # Refresh from disk in case another worker issued the token
+    if token not in PASSPORT_TOKENS:
+        PASSPORT_TOKENS.update(_load_passport_tokens())
     if token not in PASSPORT_TOKENS:
         return False
     if consume:
         PASSPORT_TOKENS.discard(token)
+        _save_passport_tokens()
     return True
+
+
+def hash_access_token(token: str) -> str:
+    from backend.orchestration.privacy import hash_secure_token
+
+    return hash_secure_token(token)
+
+
+def bind_case_access_token(case_id: str, token: str) -> None:
+    """Remember passport token on the case so Guardian POSTs survive server reload."""
+    if not case_id or not token:
+        return
+    update_case(case_id, access_token_hash=hash_access_token(token))
+
+
+def victim_token_ok(token: str, case_id: str | None = None) -> bool:
+    """
+    Accept live passport token, OR the passport hash bound at Guardian activate,
+    OR the case secure-channel token (issued by the pipeline).
+    """
+    if not token:
+        return False
+    if consume_or_check_token(token, consume=False):
+        return True
+    if case_id:
+        case = get_case(case_id)
+        if not case:
+            return False
+        stored = case.get('access_token_hash') or ''
+        if stored and hash_access_token(token) == stored:
+            return True
+        owned = find_case_by_secure_token(token)
+        if owned and owned.get('id') == case_id:
+            return True
+        return False
+    return find_case_by_secure_token(token) is not None
 
 
 def _next_public_id(cases: list[dict[str, Any]]) -> str:
@@ -182,10 +253,11 @@ def create_incident_fast(payload: CaseCreate, evidence_meta: list[dict[str, str]
         'live_status': {
             'analysing': True,
             'plain': 'We\'re analysing it now.',
-            'severity_detected': 'analyzing',
         },
         'privacy': {'redacted_preview': False, 'contact_visible_to': 'admin'},
         'secure_channel': {},
+        'source': 'report',
+        'guardian': {},
         'created_at': now,
         'updated_at': now,
         'Name': (payload.name or '').strip() or 'Anonymous',
@@ -275,10 +347,72 @@ def get_case(case_id: str) -> Optional[dict[str, Any]]:
     return None
 
 
+def merge_guardian(existing: dict[str, Any] | None, incoming: dict[str, Any] | None) -> dict[str, Any]:
+    """Merge guardian blobs without wiping live transcript lines."""
+    prev = dict(existing or {})
+    nxt = dict(incoming or {})
+    if not nxt:
+        return prev
+    if not prev:
+        out = dict(nxt)
+        lines = list(out.get('transcript') or [])
+        out['transcript'] = lines[-80:]
+        return out
+
+    prev_lines = list(prev.get('transcript') or [])
+    next_lines = list(nxt.get('transcript') or [])
+    seen: set[str] = set()
+    merged: list[dict[str, Any]] = []
+    for line in prev_lines + next_lines:
+        if not isinstance(line, dict):
+            continue
+        text = str(line.get('text') or '').strip()
+        if not text:
+            continue
+        key = f"{line.get('at') or ''}|{text}"
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(line)
+    out = {**prev, **nxt}
+    out['transcript'] = merged[-80:]
+    out['active'] = bool(prev.get('active') or nxt.get('active'))
+    out['recording'] = bool(prev.get('recording') or nxt.get('recording'))
+    # Merge detected events (union by kind|t_sec|label)
+    prev_ev = list(prev.get('detected_events') or [])
+    next_ev = list(nxt.get('detected_events') or [])
+    ev_seen: set[str] = set()
+    ev_merged: list[dict[str, Any]] = []
+    for ev in prev_ev + next_ev:
+        if not isinstance(ev, dict):
+            continue
+        key = f"{ev.get('kind')}|{ev.get('t_sec')}|{ev.get('label')}"
+        if key in ev_seen:
+            continue
+        ev_seen.add(key)
+        ev_merged.append(ev)
+    if ev_merged:
+        out['detected_events'] = ev_merged[-40:]
+    # Prefer non-empty live_summary
+    if not (nxt.get('live_summary') or '').strip() and (prev.get('live_summary') or '').strip():
+        out['live_summary'] = prev.get('live_summary')
+    # Never clear evidence_pending / contacts_notified to False if newer says True
+    if prev.get('evidence_pending') and 'evidence_pending' not in nxt:
+        out['evidence_pending'] = True
+    if prev.get('contacts_notified') or nxt.get('contacts_notified'):
+        out['contacts_notified'] = bool(prev.get('contacts_notified') or nxt.get('contacts_notified'))
+    return out
+
+
 def update_case(case_id: str, **fields: Any) -> Optional[dict[str, Any]]:
     cases = _load_cases()
     for i, case in enumerate(cases):
         if case.get('id') == case_id:
+            if 'guardian' in fields:
+                fields = {
+                    **fields,
+                    'guardian': merge_guardian(case.get('guardian'), fields.get('guardian')),
+                }
             case.update(fields)
             case['updated_at'] = utc_now()
             cases[i] = case
@@ -287,16 +421,115 @@ def update_case(case_id: str, **fields: Any) -> Optional[dict[str, Any]]:
     return None
 
 
-def save_evidence_file(filename: str, content: bytes) -> dict[str, str]:
+def save_evidence_file(
+    filename: str,
+    content: bytes,
+    *,
+    encrypt: bool = True,
+    duration_sec: float | None = None,
+    kind: str = 'audio',
+) -> dict[str, Any]:
+    """Persist evidence bytes; optionally Fernet-wrap at rest; return rich metadata."""
+    import hashlib
+
     ensure_dirs()
+    digest = hashlib.sha256(content).hexdigest()
     safe_name = f'{uuid.uuid4().hex}_{Path(filename).name}'
     path = UPLOAD_DIR / safe_name
-    path.write_bytes(content)
+    encrypted_at_rest = False
+    stored = content
+    if encrypt:
+        try:
+            from backend.orchestration.privacy import _fernet
+
+            f = _fernet()
+            if f is not None:
+                stored = f.encrypt(content)
+                encrypted_at_rest = True
+                if not safe_name.endswith('.enc'):
+                    safe_name = f'{safe_name}.enc'
+                    path = UPLOAD_DIR / safe_name
+        except Exception:
+            encrypted_at_rest = False
+            stored = content
+    path.write_bytes(stored)
     return {
+        'id': uuid.uuid4().hex,
         'filename': Path(filename).name,
         'stored_as': safe_name,
         'path': str(path),
+        'sha256': digest,
+        'bytes': len(content),
+        'size': len(content),
+        'duration_sec': duration_sec,
+        'encrypted_at_rest': encrypted_at_rest,
+        'kind': kind,
+        'uploaded_at': utc_now(),
+        'pending': False,
     }
+
+
+def read_evidence_bytes(meta: dict[str, Any]) -> bytes | None:
+    """Load evidence from disk; decrypt Fernet wrapper when needed."""
+    stored_as = meta.get('stored_as') or ''
+    path_str = meta.get('path') or ''
+    path = Path(path_str) if path_str else (UPLOAD_DIR / stored_as if stored_as else None)
+    if not path or not path.exists():
+        return None
+    raw = path.read_bytes()
+    if meta.get('encrypted_at_rest'):
+        try:
+            from backend.orchestration.privacy import _fernet
+
+            f = _fernet()
+            if f is not None:
+                return f.decrypt(raw)
+        except Exception:
+            return None
+    return raw
+
+
+def append_audio_chunk(case_id: str, seq: int, content: bytes) -> Path:
+    """Append/write chunk into a staging file for this case session."""
+    ensure_dirs()
+    staging = UPLOAD_DIR / f'guardian_session_{case_id}.webm.part'
+    # WebM timeslices from MediaRecorder are not trivial to concatenate as raw bytes
+    # for all browsers; we still append for finalize assembly of blob parts from client.
+    # Prefer client finalize with full blob; staging keeps latest chunk for Gemini STT.
+    chunk_path = UPLOAD_DIR / f'guardian_chunk_{case_id}_{seq}.webm'
+    chunk_path.write_bytes(content)
+    # Track session index
+    idx_path = UPLOAD_DIR / f'guardian_session_{case_id}.idx'
+    prev = []
+    if idx_path.exists():
+        try:
+            prev = json.loads(idx_path.read_text(encoding='utf-8'))
+        except Exception:
+            prev = []
+    prev.append({'seq': seq, 'file': chunk_path.name, 'bytes': len(content)})
+    idx_path.write_text(json.dumps(prev[-200:]), encoding='utf-8')
+    # Also rewrite staging with last chunk (usable for STT)
+    staging.write_bytes(content)
+    return chunk_path
+
+
+def assemble_session_audio(case_id: str) -> bytes | None:
+    """Concatenate staged chunks in seq order (best-effort WebM parts)."""
+    idx_path = UPLOAD_DIR / f'guardian_session_{case_id}.idx'
+    if not idx_path.exists():
+        return None
+    try:
+        items = json.loads(idx_path.read_text(encoding='utf-8'))
+    except Exception:
+        return None
+    parts: list[bytes] = []
+    for item in sorted(items, key=lambda x: int(x.get('seq') or 0)):
+        p = UPLOAD_DIR / str(item.get('file') or '')
+        if p.exists():
+            parts.append(p.read_bytes())
+    if not parts:
+        return None
+    return b''.join(parts)
 
 
 def to_admin_dashboard_doc(case: dict[str, Any]) -> dict[str, Any]:

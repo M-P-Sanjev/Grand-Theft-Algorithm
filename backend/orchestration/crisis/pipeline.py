@@ -241,7 +241,7 @@ def process_victim_message(
     )
     case['last_activity_at'] = utc_now()
 
-    mem = update_memory(case_id, message=message, emotion=emotion, case=case)
+    mem = update_memory(case_id, message=message, emotion=emotion, case=case, kind=kind)
     history_list = list(case.get('crisis_history') or [])
     history_list.append({'at': utc_now(), 'kind': kind, 'risk': severity['risk_index']})
     case['crisis_history'] = history_list[-20:]

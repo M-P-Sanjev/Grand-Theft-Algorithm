@@ -18,18 +18,23 @@ from fastapi.responses import StreamingResponse
 from backend.cases import (
     CaseCreate,
     admin_key,
+    append_audio_chunk,
     append_secure_message,
+    assemble_session_audio,
+    bind_case_access_token,
     consume_or_check_token,
     create_incident_fast,
     find_case_by_secure_token,
     get_case,
     issue_passport_token,
     list_cases,
+    read_evidence_bytes,
     reorchestrate_case,
     save_evidence_file,
     secret_passport,
     update_case,
     escalation_contacts,
+    victim_token_ok,
 )
 from backend.orchestration.agents.legal import run_legal
 from backend.orchestration.agents.therapy import run_therapy
@@ -39,6 +44,12 @@ from backend.schema import (
     AgentQuestionBody,
     ChatStreamBody,
     EscalateBody,
+    GuardianActivateBody,
+    GuardianAudioChunkBody,
+    GuardianContactNotifyBody,
+    GuardianEvidenceBody,
+    GuardianEvidenceFinalizeBody,
+    GuardianTranscriptBody,
     LocationUpdateBody,
     PassportRequest,
     SecureMessageBody,
@@ -70,6 +81,8 @@ app.add_middleware(
         'http://127.0.0.1:3000',
         'http://localhost:3001',
         'http://127.0.0.1:3001',
+        'http://localhost:3002',
+        'http://127.0.0.1:3002',
     ],
     allow_credentials=True,
     allow_methods=['*'],
@@ -411,6 +424,491 @@ async def get_case_detail(case_id: str, x_admin_key: str = Header(default='')):
     if not case:
         raise HTTPException(status_code=404, detail='Case not found')
     return case
+
+
+@app.get('/cases/{case_id}/evidence/{evidence_id}/meta')
+async def get_evidence_meta(case_id: str, evidence_id: str, x_admin_key: str = Header(default='')):
+    _require_admin(x_admin_key)
+    case = get_case(case_id)
+    if not case:
+        raise HTTPException(status_code=404, detail='Case not found')
+    for item in case.get('evidence') or []:
+        if str(item.get('id') or item.get('stored_as') or '') == evidence_id or str(
+            item.get('stored_as') or ''
+        ) == evidence_id:
+            return {
+                'id': item.get('id') or item.get('stored_as'),
+                'filename': item.get('filename'),
+                'sha256': item.get('sha256'),
+                'bytes': item.get('bytes') or item.get('size'),
+                'duration_sec': item.get('duration_sec'),
+                'encrypted_at_rest': item.get('encrypted_at_rest'),
+                'uploaded_at': item.get('uploaded_at'),
+                'kind': item.get('kind'),
+                'pending': item.get('pending'),
+            }
+    raise HTTPException(status_code=404, detail='Evidence not found')
+
+
+@app.get('/cases/{case_id}/evidence/{evidence_id}')
+async def stream_evidence(case_id: str, evidence_id: str, x_admin_key: str = Header(default='')):
+    _require_admin(x_admin_key)
+    from fastapi.responses import Response
+
+    case = get_case(case_id)
+    if not case:
+        raise HTTPException(status_code=404, detail='Case not found')
+    meta = None
+    for item in case.get('evidence') or []:
+        if str(item.get('id') or '') == evidence_id or str(item.get('stored_as') or '') == evidence_id:
+            meta = item
+            break
+    if not meta:
+        raise HTTPException(status_code=404, detail='Evidence not found')
+    raw = read_evidence_bytes(meta)
+    if raw is None:
+        raise HTTPException(status_code=404, detail='Evidence file missing')
+    filename = meta.get('filename') or 'evidence.webm'
+    media = 'audio/webm' if filename.endswith('.webm') or 'webm' in filename else 'application/octet-stream'
+    return Response(
+        content=raw,
+        media_type=media,
+        headers={
+            'Content-Disposition': f'inline; filename="{filename}"',
+            'X-Evidence-SHA256': str(meta.get('sha256') or ''),
+            'Cache-Control': 'no-store',
+        },
+    )
+
+
+@app.get('/cases/{case_id}/status')
+async def get_case_status(
+    case_id: str,
+    token: str = '',
+    x_passport_token: str = Header(default='', alias='X-Passport-Token'),
+):
+    """Victim-safe status snapshot for poll fallback + Guardian overlay."""
+    tok = token or x_passport_token
+    if not tok or not victim_token_ok(tok, case_id):
+        raise HTTPException(status_code=401, detail='Unauthorized')
+    case = get_case(case_id)
+    if not case:
+        raise HTTPException(status_code=404, detail='Case not found')
+    guardian = case.get('guardian') or {}
+    return {
+        'case_id': case.get('id'),
+        'public_id': case.get('public_id'),
+        'status': case.get('status'),
+        'source': case.get('source'),
+        'risk_score': case.get('risk_score'),
+        'risk_tier': case.get('risk_tier'),
+        'severity': case.get('severity'),
+        'routing': case.get('routing'),
+        'pipeline': case.get('pipeline'),
+        'pipeline_status': (case.get('pipeline') or {}).get('status') or case.get('pipeline_status'),
+        'live_status': case.get('live_status'),
+        'crisis': case.get('crisis'),
+        'ai_summary': case.get('ai_summary'),
+        'next_actions': case.get('next_actions'),
+        'legal_brief': case.get('legal_brief'),
+        'therapy_brief': case.get('therapy_brief'),
+        'timeline': case.get('timeline'),
+        'lat': case.get('lat'),
+        'lng': case.get('lng'),
+        'location': case.get('location'),
+        'nearby_resources': case.get('nearby_resources'),
+        'ai_recommendation': case.get('ai_recommendation'),
+        'guardian': {
+            'active': bool(guardian.get('active')),
+            'recording': bool(guardian.get('recording')),
+            'stealth': bool(guardian.get('stealth')),
+            'activated_at': guardian.get('activated_at'),
+            'transcript': (guardian.get('transcript') or [])[-20:],
+            'detected_events': (guardian.get('detected_events') or [])[-12:],
+            'live_summary': guardian.get('live_summary'),
+            'recording_meta': guardian.get('recording_meta'),
+            'evidence_pending': bool(guardian.get('evidence_pending')),
+            'contacts_notified': bool(guardian.get('contacts_notified')),
+        },
+    }
+
+
+@app.post('/guardian/activate')
+async def guardian_activate(body: GuardianActivateBody, background_tasks: BackgroundTasks):
+    if not victim_token_ok(body.token):
+        raise HTTPException(status_code=401, detail='Session expired. Open Water again.')
+
+    from backend.orchestration.crisis.live import publish, publish_case
+    from backend.orchestration.crisis.jobs import run_incident_pipeline
+    from backend.orchestration.crisis.timeline import append_timeline
+
+    now = __import__('backend.cases', fromlist=['utc_now']).utc_now()
+    location_meta = {
+        'source': 'guardian',
+        'hide_exact': True,
+        'live_tracking': True,
+    }
+    payload = CaseCreate(
+        notes='Guardian Mode activated. Emergency listening started.',
+        frequency='ongoing',
+        severity='critical',
+        name=body.name,
+        phone=body.phone,
+        location=body.location,
+        lat=body.lat,
+        lng=body.lng,
+        token=body.token,
+        evidence=[],
+        location_meta=location_meta,
+    )
+    case = create_incident_fast(payload, [])
+    guardian = {
+        'active': True,
+        'activated_at': now,
+        'stealth': bool(body.stealth),
+        'recording': bool(body.recording),
+        'transcript': [],
+        'evidence_pending': True,
+        'contacts_notified': False,
+        'camera_enabled': False,
+    }
+    append_timeline(case, 'Guardian activated', detail='Safra wake word / activate')
+    append_timeline(case, 'Recording started', detail='Encrypted evidence pending upload')
+    case = update_case(
+        case['id'],
+        source='guardian',
+        guardian=guardian,
+        timeline=case.get('timeline'),
+        risk_tier='analyzing',
+        severity='critical',
+        live_status={
+            **(case.get('live_status') or {}),
+            'analysing': True,
+            'guardian_recording': True,
+            'plain': 'Guardian Mode active — recording evidence.',
+        },
+    ) or case
+    bind_case_access_token(case['id'], body.token)
+
+    publish(
+        {
+            'type': 'guardian_activated',
+            'case_id': case['id'],
+            'public_id': case.get('public_id'),
+            'guardian': guardian,
+            'lat': case.get('lat'),
+            'lng': case.get('lng'),
+            'risk_tier': 'analyzing',
+        }
+    )
+    publish(
+        {
+            'type': 'incident_received',
+            'case_id': case['id'],
+            'public_id': case.get('public_id'),
+            'name': case.get('name'),
+            'location': case.get('location'),
+            'lat': case.get('lat'),
+            'lng': case.get('lng'),
+            'created_at': case.get('created_at'),
+            'risk_tier': 'analyzing',
+            'pipeline_status': 'received',
+            'status': 'open',
+            'source': 'guardian',
+            'guardian': guardian,
+        }
+    )
+    publish_case(case, event_type='incident_received')
+
+    background_tasks.add_task(run_incident_pipeline, case['id'])
+
+    return {
+        'status': 'ok',
+        'case_id': case['id'],
+        'public_id': case.get('public_id'),
+        'guardian': guardian,
+        'message': 'Guardian Mode activated.',
+        'orchestration': {
+            'case_id': case['id'],
+            'public_id': case.get('public_id'),
+            'risk_tier': 'analyzing',
+            'live_status': case.get('live_status'),
+        },
+    }
+
+
+@app.post('/guardian/{case_id}/transcript')
+async def guardian_transcript(case_id: str, body: GuardianTranscriptBody):
+    if not victim_token_ok(body.token, case_id):
+        raise HTTPException(
+            status_code=401,
+            detail='Session expired — reopen Water / passport, then Activate again.',
+        )
+    case = get_case(case_id)
+    if not case:
+        raise HTTPException(status_code=404, detail='Case not found')
+    from backend.orchestration.crisis.guardian import apply_transcript_chunk
+
+    updated = apply_transcript_chunk(
+        case_id,
+        body.text,
+        final=body.final,
+        t_sec=body.t_sec,
+        source=body.source or 'browser',
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail='Case not found')
+    return {
+        'status': 'ok',
+        'risk_score': updated.get('risk_score'),
+        'risk_tier': updated.get('risk_tier'),
+        'crisis': updated.get('crisis'),
+        'guardian': updated.get('guardian'),
+    }
+
+
+@app.post('/guardian/{case_id}/audio-chunk')
+async def guardian_audio_chunk(case_id: str, body: GuardianAudioChunkBody):
+    if not victim_token_ok(body.token, case_id):
+        raise HTTPException(status_code=401, detail='Unauthorized')
+    if not get_case(case_id):
+        raise HTTPException(status_code=404, detail='Case not found')
+    import base64
+
+    try:
+        raw = base64.b64decode(body.content_b64)
+    except Exception:
+        raise HTTPException(status_code=400, detail='Invalid audio chunk')
+
+    append_audio_chunk(case_id, body.seq, raw)
+    transcript = ''
+    force = body.force_stt or body.stt in ('browser_failed', 'pending', 'unsupported')
+    if force and len(raw) > 800:
+        from backend.orchestration.crisis.stt_gemini import transcribe_audio_bytes
+        from backend.orchestration.crisis.guardian import apply_transcript_chunk
+
+        transcript = transcribe_audio_bytes(raw, mime=body.mime or 'audio/webm')
+        if transcript:
+            apply_transcript_chunk(
+                case_id,
+                transcript,
+                final=True,
+                t_sec=body.t_sec,
+                source='gemini',
+            )
+    return {'status': 'ok', 'seq': body.seq, 'transcript': transcript}
+
+
+@app.post('/guardian/{case_id}/evidence/finalize')
+async def guardian_evidence_finalize(case_id: str, body: GuardianEvidenceFinalizeBody):
+    if not victim_token_ok(body.token, case_id):
+        raise HTTPException(status_code=401, detail='Unauthorized')
+    case = get_case(case_id)
+    if not case:
+        raise HTTPException(status_code=404, detail='Case not found')
+
+    import base64
+
+    from backend.orchestration.crisis.live import publish, publish_case
+    from backend.orchestration.crisis.timeline import append_timeline
+
+    raw = b''
+    if body.content_b64:
+        try:
+            raw = base64.b64decode(body.content_b64)
+        except Exception:
+            raise HTTPException(status_code=400, detail='Invalid evidence payload')
+    if not raw:
+        raw = assemble_session_audio(case_id) or b''
+    if not raw:
+        raise HTTPException(status_code=400, detail='No audio to finalize')
+
+    meta = save_evidence_file(
+        body.filename or 'guardian-audio.webm',
+        raw,
+        encrypt=True,
+        duration_sec=body.duration_sec,
+        kind='audio',
+    )
+    meta['pending'] = False if body.live_snapshot else (not body.confirm_upload)
+    meta['live_snapshot'] = bool(body.live_snapshot)
+    evidence = list(case.get('evidence') or [])
+    if body.live_snapshot:
+        # Replace previous live snapshot so admin always has newest playable file
+        evidence = [e for e in evidence if not e.get('live_snapshot')]
+        evidence.append(meta)
+    else:
+        evidence = [e for e in evidence if not e.get('live_snapshot')]
+        evidence.append(meta)
+
+    guardian = dict(case.get('guardian') or {})
+    guardian['evidence_pending'] = bool(meta.get('pending'))
+    # Live snapshots keep recording=true; final save stops recording flag
+    if body.live_snapshot:
+        guardian['recording'] = True
+    else:
+        guardian['recording'] = False
+    guardian['recording_meta'] = {
+        'evidence_id': meta.get('id'),
+        'sha256': meta.get('sha256'),
+        'bytes': meta.get('bytes'),
+        'duration_sec': meta.get('duration_sec'),
+        'encrypted_at_rest': meta.get('encrypted_at_rest'),
+        'uploaded_at': meta.get('uploaded_at'),
+        'live_snapshot': bool(body.live_snapshot),
+    }
+    if not body.live_snapshot:
+        append_timeline(case, 'Evidence Saved', detail=meta.get('sha256', '')[:16])
+    elif not any(
+        (t.get('event') or '') == 'Evidence uploading' for t in (case.get('timeline') or [])[-5:]
+    ):
+        append_timeline(case, 'Evidence uploading', detail=f'{meta.get("bytes")} bytes live')
+
+    updated = update_case(
+        case_id,
+        evidence=evidence,
+        guardian=guardian,
+        timeline=case.get('timeline'),
+    )
+    publish(
+        {
+            'type': 'guardian_evidence',
+            'case_id': case_id,
+            'pending': meta.get('pending'),
+            'live_snapshot': bool(body.live_snapshot),
+            'evidence': {
+                'id': meta.get('id'),
+                'sha256': meta.get('sha256'),
+                'bytes': meta.get('bytes'),
+                'duration_sec': meta.get('duration_sec'),
+                'filename': meta.get('filename'),
+                'live_snapshot': bool(body.live_snapshot),
+            },
+        }
+    )
+    if updated:
+        publish_case(updated, event_type='case_update')
+    return {'status': 'ok', 'evidence': meta, 'pending': meta.get('pending')}
+
+
+@app.post('/guardian/{case_id}/evidence')
+async def guardian_evidence(case_id: str, body: GuardianEvidenceBody):
+    if not victim_token_ok(body.token, case_id):
+        raise HTTPException(status_code=401, detail='Unauthorized')
+    case = get_case(case_id)
+    if not case:
+        raise HTTPException(status_code=404, detail='Case not found')
+
+    import base64
+
+    from backend.orchestration.crisis.live import publish, publish_case
+    from backend.orchestration.crisis.timeline import append_timeline
+
+    try:
+        raw = base64.b64decode(body.content_b64)
+    except Exception:
+        raise HTTPException(status_code=400, detail='Invalid evidence payload')
+
+    # Prefer playable server-side storage (ignore client AES flag for responder copy)
+    meta = save_evidence_file(
+        body.filename,
+        raw,
+        encrypt=True,
+        duration_sec=body.duration_sec,
+        kind=body.kind or 'audio',
+    )
+    meta['pending'] = not body.confirm_upload
+    evidence = list(case.get('evidence') or [])
+    evidence.append(meta)
+
+    guardian = dict(case.get('guardian') or {})
+    risk_tier = (case.get('risk_tier') or '').lower()
+    auto = risk_tier == 'critical' and body.confirm_upload is False and guardian.get('auto_send_critical')
+    if body.confirm_upload or auto:
+        guardian['evidence_pending'] = False
+        meta['pending'] = False
+        append_timeline(case, 'Evidence Saved', detail=meta.get('sha256', '')[:16])
+    else:
+        guardian['evidence_pending'] = True
+        append_timeline(case, 'Evidence captured (pending confirm)', detail=meta.get('filename'))
+
+    guardian['recording_meta'] = {
+        'evidence_id': meta.get('id'),
+        'sha256': meta.get('sha256'),
+        'bytes': meta.get('bytes'),
+        'duration_sec': meta.get('duration_sec'),
+        'encrypted_at_rest': meta.get('encrypted_at_rest'),
+        'uploaded_at': meta.get('uploaded_at'),
+    }
+
+    updated = update_case(case_id, evidence=evidence, guardian=guardian, timeline=case.get('timeline'))
+    publish(
+        {
+            'type': 'guardian_evidence',
+            'case_id': case_id,
+            'pending': meta.get('pending'),
+            'filename': meta.get('filename'),
+            'evidence': {
+                'id': meta.get('id'),
+                'sha256': meta.get('sha256'),
+                'bytes': meta.get('bytes'),
+                'duration_sec': meta.get('duration_sec'),
+            },
+        }
+    )
+    if updated:
+        publish_case(updated, event_type='case_update')
+    return {'status': 'ok', 'evidence': meta, 'pending': meta.get('pending')}
+
+
+@app.post('/guardian/{case_id}/contact-notify')
+async def guardian_contact_notify(case_id: str, body: GuardianContactNotifyBody):
+    if not victim_token_ok(body.token, case_id):
+        raise HTTPException(status_code=401, detail='Unauthorized')
+    case = get_case(case_id)
+    if not case:
+        raise HTTPException(status_code=404, detail='Case not found')
+
+    from backend.orchestration.crisis.live import publish, publish_case
+    from backend.orchestration.crisis.timeline import append_timeline
+
+    msg = body.message or (
+        'Safra Guardian emergency alert. Approximate location shared. Please check on me.'
+    )
+    detail = f"{body.contact_name or 'Trusted contact'} · {body.contact_phone or 'queued'}"
+    append_timeline(case, 'Trusted contact notified', detail=detail)
+    guardian = dict(case.get('guardian') or {})
+    guardian['contacts_notified'] = True
+    notify_log = list(case.get('guardian_contact_log') or [])
+    notify_log.append(
+        {
+            'at': __import__('backend.cases', fromlist=['utc_now']).utc_now(),
+            'name': body.contact_name,
+            'phone': body.contact_phone,
+            'message': msg,
+            'lat': case.get('lat'),
+            'lng': case.get('lng'),
+            'status': 'queued',
+        }
+    )
+    updated = update_case(
+        case_id,
+        guardian=guardian,
+        timeline=case.get('timeline'),
+        guardian_contact_log=notify_log,
+        notify_status='queued',
+    )
+    publish(
+        {
+            'type': 'guardian_contact',
+            'case_id': case_id,
+            'contact_name': body.contact_name,
+            'status': 'queued',
+        }
+    )
+    if updated:
+        publish_case(updated, event_type='case_update')
+    return {'status': 'ok', 'queued': True, 'message': msg}
 
 
 @app.get('/cases/{case_id}/agents')

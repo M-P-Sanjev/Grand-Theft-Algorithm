@@ -109,7 +109,27 @@ export default function ReportPage() {
           : null) ||
         ev.stage.replace(/_/g, ' ')
       setLiveStages((prev) => {
-        const order = ['received', 'analyzing', 'emotion_detected', 'risk_assessing', 'risk_complete', 'legal_rag', 'legal_ready', 'therapy_rag', 'therapy_ready', 'resources', 'dashboard_sync', 'notify', 'admin_notified', 'map', 'map_update', 'complete']
+        const order = [
+          'received',
+          'analyzing',
+          'emotion_detected',
+          'violence',
+          'violence_detected',
+          'risk_assessing',
+          'risk_complete',
+          'legal_rag',
+          'legal_ready',
+          'therapy_rag',
+          'therapy_ready',
+          'resources',
+          'dashboard',
+          'dashboard_sync',
+          'notify',
+          'admin_notified',
+          'map',
+          'map_update',
+          'complete',
+        ]
         const mapped: Record<string, string> = {
           received: 'received',
           analyzing: 'analyzing',
@@ -123,6 +143,7 @@ export default function ReportPage() {
           therapy_rag: 'therapy_rag',
           therapy_ready: 'therapy_rag',
           resources: 'resources',
+          dashboard: 'complete',
           dashboard_sync: 'complete',
           notify: 'complete',
           admin_notified: 'complete',
@@ -130,17 +151,28 @@ export default function ReportPage() {
           map_update: 'complete',
           complete: 'complete',
         }
-        const uiId = mapped[ev.stage!] || 'analyzing'
+        const uiId = mapped[ev.stage!]
+        if (!uiId) return prev
+        const uiOrder = ['received', 'analyzing', 'violence', 'legal_rag', 'therapy_rag', 'resources', 'complete']
+        const uiEi = uiOrder.indexOf(uiId)
         return prev.map((s) => {
-          const si = order.indexOf(s.id === 'analyzing' ? 'analyzing' : s.id)
+          const uiSi = uiOrder.indexOf(s.id)
           const ei = order.indexOf(ev.stage!)
           if (s.id === uiId) {
-            return { ...s, label: s.id === 'received' ? s.label : label, done: true, active: ev.stage !== 'complete' }
+            return {
+              ...s,
+              label: s.id === 'received' ? s.label : label,
+              done: true,
+              active: ev.stage !== 'complete' && uiId !== 'complete',
+            }
           }
-          if (s.id === 'complete' && ev.stage === 'complete') {
+          if (s.id === 'complete' && (ev.stage === 'complete' || uiId === 'complete')) {
+            return { ...s, done: ev.stage === 'complete' || uiId === 'complete', active: false }
+          }
+          if (uiSi >= 0 && uiEi >= 0 && uiSi < uiEi) {
             return { ...s, done: true, active: false }
           }
-          if (si >= 0 && ei >= 0 && si < ei) {
+          if (ei >= 0 && s.id === 'received') {
             return { ...s, done: true, active: false }
           }
           return { ...s, active: false }
@@ -210,6 +242,88 @@ export default function ReportPage() {
     },
   })
 
+  // Poll fallback when WS events are missed (threadpool publish races)
+  useEffect(() => {
+    if (!result?.caseId || !passportToken) return
+    let cancelled = false
+    const caseId = result.caseId
+
+    const mergeStatus = (data: Record<string, unknown>) => {
+      const pipeline = data.pipeline as Orchestration['pipeline'] | undefined
+      const stages = (pipeline?.stages || []) as { stage?: string; label?: string }[]
+      if (stages.length) {
+        const last = stages[stages.length - 1]
+        if (last?.stage) {
+          applyLiveEvent(
+            {
+              type: 'pipeline_stage',
+              case_id: caseId,
+              stage: last.stage,
+              label: last.label,
+            },
+            caseId,
+          )
+        }
+      }
+      applyLiveEvent(
+        {
+          type: 'case_update',
+          case_id: caseId,
+          risk_score: data.risk_score as number | undefined,
+          risk_tier: data.risk_tier as string | undefined,
+          routing: data.routing as string | undefined,
+          live_status: data.live_status as Orchestration['live_status'],
+          ai_summary: data.ai_summary as Orchestration['ai_summary'],
+          next_actions: data.next_actions as Orchestration['next_actions'],
+          crisis: data.crisis as Orchestration['crisis'],
+          pipeline: pipeline,
+          legal_brief: data.legal_brief as Orchestration['legal_brief'],
+          therapy_brief: data.therapy_brief as Orchestration['therapy_brief'],
+        },
+        caseId,
+      )
+      const status = String(
+        (pipeline as { status?: string } | undefined)?.status || data.pipeline_status || '',
+      )
+      return status === 'complete' || status === 'synced'
+    }
+
+    const tick = async () => {
+      try {
+        const res = await fetch(
+          `${API_BASE}/cases/${caseId}/status?token=${encodeURIComponent(passportToken)}`,
+        )
+        if (!res.ok || cancelled) return
+        const data = (await res.json()) as Record<string, unknown>
+        const done = mergeStatus(data)
+        if (done && !cancelled) {
+          applyLiveEvent(
+            { type: 'pipeline_stage', case_id: caseId, stage: 'complete', label: 'Risk assessment complete.' },
+            caseId,
+          )
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+
+    void tick()
+    const id = setInterval(() => void tick(), 2000)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [result?.caseId, passportToken, applyLiveEvent])
+
+  const companionsReady = useMemo(() => {
+    return !!(
+      orch?.risk_score != null ||
+      orch?.legal_brief ||
+      orch?.therapy_brief ||
+      result?.orchestration?.risk_score != null
+    )
+  }, [orch, result])
+
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
     setError('')
@@ -263,10 +377,6 @@ export default function ReportPage() {
     }
   }
 
-  const companionsReady = useMemo(() => {
-    return !!(orch?.legal_brief || orch?.therapy_brief || orch?.risk_score != null)
-  }, [orch])
-
   if (!ready) {
     return (
       <main className="flex min-h-[100svh] items-center justify-center bg-void text-soft">
@@ -281,7 +391,10 @@ export default function ReportPage() {
         <p className="font-display text-2xl tracking-[0.14em] text-gold">{SITE.name}</p>
         <h1 className="font-display mt-4 text-4xl md:text-5xl">What happened?</h1>
         <p className="mt-3 max-w-lg text-sm text-soft/80">
-          Tell us in your own words. You can skip your name or phone if that feels safer.
+          Tell us in your own words. You can skip your name or phone if that feels safer.{' '}
+          <Link href="/guardian" className="text-gold-soft underline">
+            Safra Guardian Mode
+          </Link>
         </p>
 
         {result ? (
@@ -289,7 +402,13 @@ export default function ReportPage() {
             <div className="glass rounded-[1.75rem] p-8">
               <p className="text-[10px] tracking-[0.28em] text-gold uppercase">Dispatch</p>
               <h2 className="font-display mt-3 text-3xl">✓ Your request has been received.</h2>
-              <p className="mt-2 text-sm text-gold-soft">✓ We&apos;re analysing it now.</p>
+              <p className="mt-2 text-sm text-gold-soft">
+                ✓{' '}
+                {orch?.live_status?.plain ||
+                  orch?.ai_summary?.plain_status ||
+                  result.orchestration.live_status?.plain ||
+                  'We\'re analysing it now.'}
+              </p>
               {result.publicId && (
                 <p className="mt-3 text-xs tracking-[0.16em] text-muted uppercase">
                   Incident {result.publicId}

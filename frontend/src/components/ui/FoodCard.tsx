@@ -81,7 +81,7 @@ export function FoodCard({ item, index }: { item: MenuItem; index: number }) {
             }}
             className="mt-2 flex w-full items-center justify-center rounded-full bg-ivory py-2.5 text-[10px] tracking-[0.22em] text-void uppercase transition active:scale-[0.98]"
           >
-            {isSecret ? 'Select' : added ? 'Added' : 'Add to Cart'}
+            {added && !isSecret ? 'Added' : 'Add to Cart'}
           </button>
         </div>
       </motion.article>

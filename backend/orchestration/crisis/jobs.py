@@ -35,6 +35,17 @@ def _persist(case: dict[str, Any], **fields: Any) -> dict[str, Any] | None:
     if not case_id:
         return None
     case.update(fields)
+    # Reload so concurrent guardian transcripts are not wiped by stale in-memory case
+    from backend.cases import merge_guardian
+
+    fresh = get_case(case_id)
+    if fresh:
+        case['guardian'] = merge_guardian(fresh.get('guardian'), case.get('guardian'))
+        # Prefer fresher timeline if longer
+        ft = list(fresh.get('timeline') or [])
+        ct = list(case.get('timeline') or [])
+        if len(ft) > len(ct):
+            case['timeline'] = ft
     case['updated_at'] = utc_now()
     return update_case(case_id, **{k: v for k, v in case.items() if k != 'id'})
 
@@ -267,7 +278,7 @@ def run_incident_pipeline(case_id: str) -> None:
             message=notes or 'I need support',
             severity=sev_pack,
             safety=safety,
-            memory=get_memory(case_id),
+            memory=get_memory(case_id, 'therapy'),
             name=case.get('name'),
         )
         case['therapy_brief'] = {
@@ -331,7 +342,7 @@ def run_incident_pipeline(case_id: str) -> None:
 
     # --- Job 5: Nearby resources / dashboard sync ---
     def job_dashboard() -> None:
-        mark('dashboard', 'Dashboard updated')
+        mark('dashboard_sync', 'Dashboard updated')
         live = dict(case.get('live_status') or {})
         live.update(
             {

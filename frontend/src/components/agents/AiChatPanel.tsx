@@ -1,6 +1,6 @@
 'use client'
 
-import { FormEvent, useMemo, useRef, useState } from 'react'
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -89,13 +89,39 @@ export function AiChatPanel({ caseId, kind, auth, onCrisisUpdate }: Props) {
     history?: { at?: string; score?: number; tier?: string }[]
   }>({})
   const [calculating, setCalculating] = useState(false)
+  const [handoff, setHandoff] = useState<string | null>(null)
+  const [collabNote, setCollabNote] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
 
-  const title = kind === 'legal' ? 'Legal companion' : 'Crisis companion'
+  const title = kind === 'legal' ? 'Legal Companion' : 'Crisis Companion'
+  const identity =
+    kind === 'legal'
+      ? 'Indian legal guidance · domestic violence law'
+      : 'Crisis support volunteer · calm · one step at a time'
   const subtitle =
     kind === 'legal'
-      ? 'Rights in plain words · one step at a time'
-      : 'Calm support · listen first · never overwhelm'
+      ? 'Plain-English rights · grounded in law · not a lawyer'
+      : 'Not a doctor · not a chatbot · here with you'
+
+  // Persist session across reloads for this case+kind
+  useEffect(() => {
+    try {
+      const key = `safra_chat_session:${caseId}:${kind}`
+      const existing = localStorage.getItem(key)
+      if (existing) setSessionId(existing)
+    } catch {
+      /* ignore */
+    }
+  }, [caseId, kind])
+
+  useEffect(() => {
+    if (!sessionId) return
+    try {
+      localStorage.setItem(`safra_chat_session:${caseId}:${kind}`, sessionId)
+    } catch {
+      /* ignore */
+    }
+  }, [sessionId, caseId, kind])
 
   async function ask(question: string) {
     const q = question.trim()
@@ -182,6 +208,18 @@ export function AiChatPanel({ caseId, kind, auth, onCrisisUpdate }: Props) {
 
           if (eventName === 'session' && typeof payload.session_id === 'string') {
             setSessionId(payload.session_id)
+          }
+          if (eventName === 'route') {
+            if (payload.suggest_switch) {
+              setHandoff(
+                kind === 'therapy'
+                  ? 'This sounds legal — the Legal Companion can go deeper on rights and orders.'
+                  : 'This sounds emotional — the Crisis Companion can stay with you on safety first.',
+              )
+            } else {
+              setHandoff(null)
+            }
+            setCollabNote(!!payload.collaborate)
           }
           if (eventName === 'status' && typeof payload.phase === 'string') {
             setPhase(payload.phase)
@@ -309,13 +347,25 @@ export function AiChatPanel({ caseId, kind, auth, onCrisisUpdate }: Props) {
 
   return (
     <div className="relative flex h-[620px] flex-col overflow-hidden rounded-[1.5rem] border border-ivory/10 bg-gradient-to-b from-panel/90 to-void/90">
-      <header className="relative z-10 border-b border-ivory/10 px-5 py-4">
+      <header
+        className={`relative z-10 border-b px-5 py-4 ${
+          kind === 'legal'
+            ? 'border-gold/20 bg-gold/[0.04]'
+            : 'border-emerald-400/15 bg-emerald-400/[0.04]'
+        }`}
+      >
         <div className="flex items-start justify-between gap-3">
           <div>
-            <p className="font-display text-xl tracking-wide text-ivory">{title}</p>
-            <p className="mt-1 text-[10px] tracking-[0.18em] text-muted uppercase">
-              {subtitle}
+            <p
+              className={`text-[10px] tracking-[0.2em] uppercase ${
+                kind === 'legal' ? 'text-gold-soft' : 'text-emerald-300/90'
+              }`}
+            >
+              {kind === 'legal' ? 'Legal aid officer' : 'Crisis support volunteer'}
             </p>
+            <p className="font-display mt-1 text-xl tracking-wide text-ivory">{title}</p>
+            <p className="mt-1 text-[10px] tracking-[0.14em] text-muted uppercase">{identity}</p>
+            <p className="mt-1 text-xs text-soft/70">{subtitle}</p>
           </div>
           {risk.tier && (
             <span className="rounded-full border border-gold/30 bg-gold/10 px-3 py-1 text-[10px] tracking-[0.14em] text-gold-soft uppercase">
@@ -326,6 +376,16 @@ export function AiChatPanel({ caseId, kind, auth, onCrisisUpdate }: Props) {
         </div>
         {phaseLabel && (
           <p className="mt-3 text-xs text-gold-soft">{phaseLabel}…</p>
+        )}
+        {handoff && (
+          <p className="mt-3 rounded-xl border border-ivory/10 bg-void/50 px-3 py-2 text-xs text-soft/85">
+            {handoff}
+          </p>
+        )}
+        {collabNote && (
+          <p className="mt-2 text-[10px] tracking-[0.14em] text-muted uppercase">
+            Both companions contributing
+          </p>
         )}
       </header>
 
@@ -374,8 +434,8 @@ export function AiChatPanel({ caseId, kind, auth, onCrisisUpdate }: Props) {
           <div className="mt-8 space-y-2 text-center text-sm text-muted">
             <p>
               {kind === 'therapy'
-                ? 'Tell me what happened — I will stay with you, one step at a time.'
-                : 'Ask what you need in everyday words. I will explain your rights simply.'}
+                ? "I'm here with you. Tell me what happened — we'll go one step at a time."
+                : 'Ask in everyday words. I will explain your rights simply, with sources.'}
             </p>
           </div>
         )}
@@ -391,7 +451,9 @@ export function AiChatPanel({ caseId, kind, auth, onCrisisUpdate }: Props) {
                 className={`max-w-[92%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${
                   m.role === 'user'
                     ? 'rounded-br-md bg-gold/20 text-ivory'
-                    : 'rounded-bl-md border border-ivory/10 bg-void/55 text-soft/95'
+                    : kind === 'legal'
+                      ? 'rounded-bl-md border border-gold/20 bg-void/55 text-soft/95'
+                      : 'rounded-bl-md border border-emerald-400/15 bg-void/55 text-soft/95'
                 }`}
               >
                 {m.role === 'assistant' && (

@@ -17,6 +17,9 @@ import { RiskPanel } from '@/components/crisis/RiskPanel'
 import { IncidentTimeline } from '@/components/crisis/IncidentTimeline'
 import { motion } from 'framer-motion'
 import { useLiveSocket, type LiveEvent } from '@/hooks/useLiveSocket'
+import { LiveTranscriptPanel } from '@/components/guardian/LiveTranscriptPanel'
+import { EvidencePlayer } from '@/components/guardian/EvidencePlayer'
+import { DetectedEvents } from '@/components/guardian/DetectedEvents'
 
 const CasesMap = dynamic(
   () => import('@/components/admin/CasesMap').then((m) => m.CasesMap),
@@ -49,7 +52,6 @@ type CaseRow = {
   pipeline_status?: string
   pipeline?: { status?: string; stages?: { stage: string; label?: string }[] }
   escalation_contacts?: Record<string, string>
-  evidence?: { filename: string; stored_as: string }[]
   agent_plan?: AgentPlanItem[]
   agent_log?: AgentLogItem[]
   legal_brief?: { answer?: string; sources?: unknown[] }
@@ -92,6 +94,44 @@ type CaseRow = {
     label?: string
     nearest_eta_min?: number
     nearest_kind?: string
+  }
+  source?: string
+  evidence?: {
+    id?: string
+    stored_as?: string
+    filename?: string
+    sha256?: string
+    bytes?: number
+    size?: number
+    duration_sec?: number
+    encrypted_at_rest?: boolean
+    uploaded_at?: string
+    pending?: boolean
+  }[]
+  guardian?: {
+    active?: boolean
+    recording?: boolean
+    stealth?: boolean
+    activated_at?: string
+    transcript?: { text?: string; at?: string; t_sec?: number }[]
+    transcript_tail?: { text?: string; at?: string; t_sec?: number }[]
+    detected_events?: {
+      kind?: string
+      label?: string
+      severity?: string
+      t_sec?: number
+      at?: string
+    }[]
+    live_summary?: string
+    recording_meta?: {
+      evidence_id?: string
+      sha256?: string
+      bytes?: number
+      duration_sec?: number
+      encrypted_at_rest?: boolean
+    }
+    evidence_pending?: boolean
+    contacts_notified?: boolean
   }
 }
 
@@ -184,6 +224,93 @@ function timeLabel(iso?: string) {
   }
 }
 
+type GuardianState = NonNullable<CaseRow['guardian']>
+type TranscriptLine = { text?: string; at?: string }
+
+function transcriptKey(line: TranscriptLine) {
+  return `${line.at || ''}|${(line.text || '').trim()}`
+}
+
+function unionTranscript(a: TranscriptLine[] = [], b: TranscriptLine[] = [], cap = 80) {
+  const seen = new Set<string>()
+  const out: TranscriptLine[] = []
+  for (const line of [...a, ...b]) {
+    const text = (line.text || '').trim()
+    if (!text) continue
+    const key = transcriptKey(line)
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ text, at: line.at })
+  }
+  return out.slice(-cap)
+}
+
+/** Never replace a richer guardian transcript with an empty/stale payload. */
+function mergeGuardianClient(
+  existing?: GuardianState | null,
+  incoming?: GuardianState | null,
+): GuardianState | undefined {
+  if (!existing && !incoming) return undefined
+  if (!incoming) return existing || undefined
+  if (!existing) return incoming
+
+  const transcript = unionTranscript(
+    existing.transcript || existing.transcript_tail || [],
+    incoming.transcript || incoming.transcript_tail || [],
+  )
+  const fromIncomingTail = incoming.transcript_tail || []
+  const transcript_tail =
+    fromIncomingTail.length > 0
+      ? unionTranscript(existing.transcript_tail || existing.transcript || [], fromIncomingTail, 12)
+      : transcript.slice(-12)
+
+  const evSeen = new Set<string>()
+  const detected_events: NonNullable<GuardianState['detected_events']> = []
+  for (const ev of [...(existing.detected_events || []), ...(incoming.detected_events || [])]) {
+    const key = `${ev.kind}|${ev.t_sec}|${ev.label}`
+    if (evSeen.has(key)) continue
+    evSeen.add(key)
+    detected_events.push(ev)
+  }
+
+  return {
+    ...existing,
+    ...incoming,
+    active: !!(existing.active || incoming.active),
+    recording: !!(existing.recording || incoming.recording),
+    transcript: transcript.length ? transcript : existing.transcript || incoming.transcript,
+    transcript_tail: transcript_tail.length
+      ? transcript_tail
+      : existing.transcript_tail || incoming.transcript_tail,
+    detected_events: detected_events.length
+      ? detected_events.slice(-40)
+      : existing.detected_events || incoming.detected_events,
+    live_summary:
+      (incoming.live_summary || '').trim() || existing.live_summary || incoming.live_summary,
+  }
+}
+
+function appendTranscriptChunk(
+  guardian: GuardianState | undefined,
+  text: string,
+  at?: string,
+  t_sec?: number,
+): GuardianState {
+  const line = {
+    text: text.trim(),
+    at: at || new Date().toISOString(),
+    t_sec,
+  }
+  const transcript = unionTranscript(guardian?.transcript || guardian?.transcript_tail || [], [line])
+  return {
+    ...guardian,
+    active: true,
+    recording: guardian?.recording !== false,
+    transcript,
+    transcript_tail: transcript.slice(-12),
+  }
+}
+
 function trendOf(c: CaseRow) {
   const t = c.crisis?.trend || (c.crisis as { trend?: string } | undefined)?.trend
   const hist = c.risk_history || []
@@ -233,7 +360,16 @@ export default function AdminPage() {
     setLiveAt(new Date().toLocaleTimeString())
     setSelected((prev) => {
       if (!prev) return prev
-      return next.find((c) => c.id === prev.id) || prev
+      const row = next.find((c) => c.id === prev.id)
+      if (!row) return prev
+      return {
+        ...row,
+        guardian: mergeGuardianClient(prev.guardian, row.guardian),
+        timeline:
+          (row.timeline?.length || 0) >= (prev.timeline?.length || 0)
+            ? row.timeline
+            : prev.timeline,
+      }
     })
   }, [])
 
@@ -268,7 +404,15 @@ export default function AdminPage() {
           headers: { 'X-Admin-Key': key },
         })
         const data = await res.json().catch(() => ({}))
-        if (res.ok) setSelected(data)
+        if (res.ok) {
+          setSelected((prev) => {
+            if (!prev || prev.id !== id) return data as CaseRow
+            return {
+              ...(data as CaseRow),
+              guardian: mergeGuardianClient(prev.guardian, (data as CaseRow).guardian),
+            }
+          })
+        }
       } catch {
         /* keep list row */
       }
@@ -311,12 +455,65 @@ export default function AdminPage() {
       es.addEventListener('live', (ev) => {
         if (cancelled) return
         try {
-          const data = JSON.parse((ev as MessageEvent).data)
-          if (data.type === 'case_update' || data.type === 'incident_received') {
+          const data = JSON.parse((ev as MessageEvent).data) as LiveEvent & {
+            case_id?: string
+            text?: string
+            at?: string
+            guardian?: CaseRow['guardian']
+          }
+          if (data.type === 'transcript_chunk' && data.case_id) {
+            const text = String(data.text || '')
+            const at = typeof data.at === 'string' ? data.at : undefined
+            const t_sec =
+              typeof (data as { t_sec?: number }).t_sec === 'number'
+                ? (data as { t_sec?: number }).t_sec
+                : undefined
+            const fromEvent = data.guardian as CaseRow['guardian'] | undefined
+            setCases((prev) =>
+              prev.map((c) => {
+                if (c.id !== data.case_id) return c
+                const withChunk = text
+                  ? appendTranscriptChunk(c.guardian, text, at, t_sec)
+                  : c.guardian
+                return {
+                  ...c,
+                  guardian: mergeGuardianClient(withChunk, fromEvent),
+                }
+              }),
+            )
+            setSelected((cur) => {
+              if (!cur || cur.id !== data.case_id) return cur
+              const withChunk = text
+                ? appendTranscriptChunk(cur.guardian, text, at, t_sec)
+                : cur.guardian
+              return {
+                ...cur,
+                guardian: mergeGuardianClient(withChunk, fromEvent),
+              }
+            })
+            setLiveMode('sse')
+            return
+          }
+          if (data.type === 'detected_event' || data.type === 'guardian_summary') {
+            if (data.case_id) {
+              setSelected((cur) => {
+                if (cur?.id === data.case_id) void openCase(data.case_id!, adminKey)
+                return cur
+              })
+            }
+            setLiveMode('sse')
+            return
+          }
+          if (
+            data.type === 'case_update' ||
+            data.type === 'incident_received' ||
+            data.type === 'guardian_activated' ||
+            data.type === 'guardian_evidence'
+          ) {
             void loadCases(adminKey, true)
             if (data.case_id) {
               setSelected((cur) => {
-                if (cur?.id === data.case_id) void openCase(data.case_id, adminKey)
+                if (cur?.id === data.case_id) void openCase(data.case_id!, adminKey)
                 return cur
               })
             }
@@ -350,10 +547,26 @@ export default function AdminPage() {
       if (!adminKey) return
       if (ev.type === 'ping') return
 
-      if (ev.type === 'incident_received' && ev.case_id) {
+      if ((ev.type === 'incident_received' || ev.type === 'guardian_activated') && ev.case_id) {
         setLiveMode('ws')
         setCases((prev) => {
-          if (prev.some((c) => c.id === ev.case_id)) return prev
+          if (prev.some((c) => c.id === ev.case_id)) {
+            return prev.map((c) =>
+              c.id === ev.case_id
+                ? {
+                    ...c,
+                    source:
+                      (ev.source as string) ||
+                      c.source ||
+                      (ev.type === 'guardian_activated' ? 'guardian' : c.source),
+                    guardian: mergeGuardianClient(
+                      c.guardian,
+                      ev.guardian as CaseRow['guardian'],
+                    ),
+                  }
+                : c,
+            )
+          }
           const row: CaseRow = {
             id: String(ev.case_id),
             public_id: ev.public_id as string | undefined,
@@ -370,9 +583,110 @@ export default function AdminPage() {
             risk_tier: 'analyzing',
             pipeline_status: 'received',
             created_at: (ev.created_at as string) || new Date().toISOString(),
+            source:
+              (ev.source as string) ||
+              (ev.type === 'guardian_activated' ? 'guardian' : 'report'),
+            guardian: mergeGuardianClient(undefined, (ev.guardian as CaseRow['guardian']) || {
+              active: ev.type === 'guardian_activated',
+              recording: true,
+            }),
           }
           return [row, ...prev]
         })
+        return
+      }
+
+      if (ev.type === 'transcript_chunk' && ev.case_id) {
+        const text = String(ev.text || '')
+        const at = typeof ev.at === 'string' ? (ev.at as string) : undefined
+        const t_sec = typeof ev.t_sec === 'number' ? (ev.t_sec as number) : undefined
+        const fromEvent = ev.guardian as CaseRow['guardian'] | undefined
+        setCases((prev) =>
+          prev.map((c) => {
+            if (c.id !== ev.case_id) return c
+            const withChunk = text
+              ? appendTranscriptChunk(c.guardian, text, at, t_sec)
+              : c.guardian
+            return {
+              ...c,
+              risk_score: (ev.risk_score as number) ?? c.risk_score,
+              risk_tier: (ev.risk_tier as string) || c.risk_tier,
+              guardian: mergeGuardianClient(withChunk, fromEvent),
+            }
+          }),
+        )
+        setSelected((cur) => {
+          if (!cur || cur.id !== ev.case_id) return cur
+          const withChunk = text
+            ? appendTranscriptChunk(cur.guardian, text, at, t_sec)
+            : cur.guardian
+          return {
+            ...cur,
+            risk_score: (ev.risk_score as number) ?? cur.risk_score,
+            risk_tier: (ev.risk_tier as string) || cur.risk_tier,
+            guardian: mergeGuardianClient(withChunk, fromEvent),
+          }
+        })
+        return
+      }
+
+      if (ev.type === 'detected_event' && ev.case_id) {
+        const event = (ev.event || {}) as {
+          kind?: string
+          label?: string
+          severity?: string
+          t_sec?: number
+          at?: string
+        }
+        setSelected((cur) => {
+          if (!cur || cur.id !== ev.case_id) return cur
+          const prev = cur.guardian?.detected_events || []
+          return {
+            ...cur,
+            guardian: {
+              ...cur.guardian,
+              active: true,
+              detected_events: [...prev, event].slice(-40),
+            },
+          }
+        })
+        setCases((prev) =>
+          prev.map((c) => {
+            if (c.id !== ev.case_id) return c
+            const list = c.guardian?.detected_events || []
+            return {
+              ...c,
+              guardian: {
+                ...c.guardian,
+                active: true,
+                detected_events: [...list, event].slice(-40),
+              },
+            }
+          }),
+        )
+        return
+      }
+
+      if (ev.type === 'guardian_summary' && ev.case_id) {
+        setSelected((cur) => {
+          if (!cur || cur.id !== ev.case_id) return cur
+          return {
+            ...cur,
+            risk_score: (ev.risk_score as number) ?? cur.risk_score,
+            risk_tier: (ev.risk_tier as string) || cur.risk_tier,
+            ai_recommendation:
+              (ev.recommendation as string) || cur.ai_recommendation,
+            guardian: {
+              ...cur.guardian,
+              live_summary: String(ev.live_summary || cur.guardian?.live_summary || ''),
+            },
+          }
+        })
+        return
+      }
+
+      if (ev.type === 'guardian_evidence' && ev.case_id) {
+        void openCase(String(ev.case_id), adminKey)
         return
       }
 
@@ -399,18 +713,29 @@ export default function AdminPage() {
                   lat: (ev.lat as number) ?? c.lat,
                   lng: (ev.lng as number) ?? c.lng,
                   location: (ev.location as string) || c.location,
+                  pipeline: (ev.pipeline as CaseRow['pipeline']) || c.pipeline,
+                  pipeline_status:
+                    (ev.pipeline_status as string) ||
+                    (ev.pipeline as { status?: string } | undefined)?.status ||
+                    c.pipeline_status,
+                  live_status: (ev.live_status as CaseRow['live_status']) || c.live_status,
+                  crisis: (ev.crisis as CaseRow['crisis']) || c.crisis,
+                  timeline: (ev.timeline as CaseRow['timeline']) || c.timeline,
+                  legal_brief: (ev.legal_brief as CaseRow['legal_brief']) || c.legal_brief,
+                  therapy_brief: (ev.therapy_brief as CaseRow['therapy_brief']) || c.therapy_brief,
+                  ai_summary: (ev.ai_summary as CaseRow['ai_summary']) || c.ai_summary,
+                  next_actions: (ev.next_actions as CaseRow['next_actions']) || c.next_actions,
+                  ai_recommendation:
+                    (ev.ai_recommendation as string) || c.ai_recommendation,
+                  source: (ev.source as string) || c.source,
+                  guardian: mergeGuardianClient(
+                    c.guardian,
+                    ev.guardian as CaseRow['guardian'],
+                  ),
                   location_privacy:
                     (ev.location_privacy as CaseRow['location_privacy']) || c.location_privacy,
                   location_updated_at:
                     (ev.location_updated_at as string) || c.location_updated_at,
-                  crisis: (ev.crisis as CaseRow['crisis']) || c.crisis,
-                  live_status: (ev.live_status as CaseRow['live_status']) || c.live_status,
-                  timeline: (ev.timeline as CaseRow['timeline']) || c.timeline,
-                  pipeline: (ev.pipeline as CaseRow['pipeline']) || c.pipeline,
-                  legal_brief: (ev.legal_brief as CaseRow['legal_brief']) || c.legal_brief,
-                  therapy_brief: (ev.therapy_brief as CaseRow['therapy_brief']) || c.therapy_brief,
-                  ai_recommendation:
-                    (ev.ai_recommendation as string) || c.ai_recommendation,
                   notify_status: (ev.notify_status as string) || c.notify_status,
                   updated_at: (ev.updated_at as string) || c.updated_at,
                 }
@@ -442,11 +767,16 @@ export default function AdminPage() {
             ai_recommendation:
               (ev.ai_recommendation as string) || cur.ai_recommendation,
             notify_status: (ev.notify_status as string) || cur.notify_status,
+            source: (ev.source as string) || cur.source,
+            guardian: mergeGuardianClient(
+              cur.guardian,
+              ev.guardian as CaseRow['guardian'],
+            ),
           }
         })
       }
     },
-    [adminKey],
+    [adminKey, openCase],
   )
 
   const { connected: wsConnected } = useLiveSocket({
@@ -458,6 +788,81 @@ export default function AdminPage() {
   useEffect(() => {
     if (wsConnected) setLiveMode('ws')
   }, [wsConnected])
+
+  const [guardianWaitTick, setGuardianWaitTick] = useState(0)
+  useEffect(() => {
+    const isGuardian =
+      selected?.source === 'guardian' ||
+      !!selected?.guardian?.active ||
+      !!selected?.guardian?.recording
+    const lines =
+      selected?.guardian?.transcript_tail || selected?.guardian?.transcript || []
+    if (!isGuardian || (lines?.length || 0) > 0) return
+    const t = setInterval(() => setGuardianWaitTick((n) => n + 1), 1000)
+    return () => clearInterval(t)
+  }, [
+    selected?.id,
+    selected?.source,
+    selected?.guardian?.active,
+    selected?.guardian?.recording,
+    selected?.guardian?.transcript_tail?.length,
+    selected?.guardian?.transcript?.length,
+  ])
+
+  // Poll selected Guardian case so transcript lands even if WS/SSE miss a chunk
+  useEffect(() => {
+    if (!adminKey || !selected?.id) return
+    const isGuardian =
+      selected.source === 'guardian' ||
+      !!selected.guardian?.active ||
+      !!selected.guardian?.recording
+    if (!isGuardian) return
+    const id = selected.id
+    const tick = () => {
+      void fetch(`${API_BASE}/cases/${id}`, {
+        headers: { 'X-Admin-Key': adminKey },
+      })
+        .then((r) => r.json())
+        .then((data: CaseRow) => {
+          if (!data?.id) return
+          setSelected((cur) => {
+            if (!cur || cur.id !== id) return cur
+            return {
+              ...cur,
+              ...data,
+              guardian: mergeGuardianClient(cur.guardian, data.guardian),
+              timeline:
+                (data.timeline?.length || 0) >= (cur.timeline?.length || 0)
+                  ? data.timeline
+                  : cur.timeline,
+            }
+          })
+          setCases((prev) =>
+            prev.map((c) =>
+              c.id === id
+                ? {
+                    ...c,
+                    risk_score: data.risk_score ?? c.risk_score,
+                    risk_tier: data.risk_tier || c.risk_tier,
+                    guardian: mergeGuardianClient(c.guardian, data.guardian),
+                    updated_at: data.updated_at || c.updated_at,
+                  }
+                : c,
+            ),
+          )
+        })
+        .catch(() => undefined)
+    }
+    tick()
+    const timer = setInterval(tick, 2000)
+    return () => clearInterval(timer)
+  }, [
+    adminKey,
+    selected?.id,
+    selected?.source,
+    selected?.guardian?.active,
+    selected?.guardian?.recording,
+  ])
 
   const sorted = useMemo(() => sortByPriority(cases), [cases])
 
@@ -593,7 +998,7 @@ export default function AdminPage() {
               {liveMode === 'ws' ? '🟢 Live WebSocket' : liveMode === 'sse' ? 'SSE' : 'reconnecting'}
               {liveAt ? ` · ${liveAt}` : ''}
             </p>
-            <h1 className="font-display mt-2 text-4xl md:text-5xl">HAVEN COMMAND CENTER</h1>
+            <h1 className="font-display mt-2 text-4xl md:text-5xl">SAFRA COMMAND CENTER</h1>
             <p className="mt-2 text-sm text-soft/70">
               Incidents stream in realtime — no refresh required
             </p>
@@ -686,12 +1091,20 @@ export default function AdminPage() {
                     >
                       <td className="px-3 py-3 font-mono text-xs text-gold-soft">
                         <span className="block text-[9px] tracking-wider text-muted uppercase">
+                          {(c.source === 'guardian' || c.guardian?.active) && (
+                            <span className="mr-1 text-rose-300">Guardian Activated · </span>
+                          )}
                           {(c.risk_tier === 'analyzing' || c.pipeline_status === 'received') &&
                           c.risk_score == null
                             ? 'NEW INCIDENT'
                             : 'Incident'}
                         </span>
                         {incidentId(c)}
+                        {c.guardian?.recording && (
+                          <span className="mt-1 block animate-pulse text-[9px] tracking-wider text-rose-300 uppercase">
+                            ● Recording
+                          </span>
+                        )}
                       </td>
                       <td className="px-3 py-3">{aliasOf(c)}</td>
                       <td className="px-3 py-3 text-soft/80">{timeLabel(c.created_at)}</td>
@@ -778,6 +1191,82 @@ export default function AdminPage() {
                   {selected.routing}
                   {selected.notify_status ? ` · ${selected.notify_status}` : ''}
                 </p>
+                {(selected.source === 'guardian' || selected.guardian?.active) && (
+                  <div className="mt-4 space-y-4">
+                    <div className="rounded-2xl border border-rose-400/30 bg-rose-500/10 px-4 py-3">
+                      <p className="text-[10px] tracking-[0.2em] text-rose-300 uppercase">
+                        Guardian Activated
+                        {selected.guardian?.recording ? ' · ● Recording' : ''}
+                      </p>
+                      {selected.guardian?.live_summary ? (
+                        <p className="mt-2 text-sm text-soft/90">{selected.guardian.live_summary}</p>
+                      ) : null}
+                    </div>
+                    <LiveTranscriptPanel
+                      lines={
+                        selected.guardian?.transcript_tail ||
+                        selected.guardian?.transcript ||
+                        []
+                      }
+                      recording={!!selected.guardian?.recording}
+                      emptyHint={(() => {
+                        void guardianWaitTick
+                        const started =
+                          selected.guardian?.activated_at || selected.created_at
+                        const ms = started
+                          ? Date.now() - new Date(started).getTime()
+                          : 0
+                        if (selected.guardian?.recording && ms >= 5000) {
+                          return 'No speech received yet — survivor can type a line in Guardian.'
+                        }
+                        return 'Waiting for speech…'
+                      })()}
+                    />
+                    <DetectedEvents
+                      events={selected.guardian?.detected_events || []}
+                      confidence={
+                        typeof selected.crisis?.confidence === 'number'
+                          ? selected.crisis.confidence
+                          : 0.9
+                      }
+                      recommendation={
+                        selected.ai_recommendation || selected.crisis?.recommendation
+                      }
+                      durationSec={
+                        selected.guardian?.recording_meta?.duration_sec ??
+                        (selected.guardian?.activated_at
+                          ? (Date.now() -
+                              new Date(selected.guardian.activated_at).getTime()) /
+                            1000
+                          : null)
+                      }
+                    />
+                    <EvidencePlayer
+                      caseId={selected.id}
+                      adminKey={adminKey}
+                      recording={!!selected.guardian?.recording}
+                      evidence={
+                        (selected.evidence || []).find(
+                          (e) =>
+                            e.id === selected.guardian?.recording_meta?.evidence_id ||
+                            e.stored_as === selected.guardian?.recording_meta?.evidence_id,
+                        ) ||
+                        (selected.evidence || []).filter((e) => !e.pending).slice(-1)[0] ||
+                        (selected.evidence || []).slice(-1)[0] ||
+                        (selected.guardian?.recording_meta
+                          ? {
+                              id: selected.guardian.recording_meta.evidence_id,
+                              sha256: selected.guardian.recording_meta.sha256,
+                              bytes: selected.guardian.recording_meta.bytes,
+                              duration_sec: selected.guardian.recording_meta.duration_sec,
+                              encrypted_at_rest:
+                                selected.guardian.recording_meta.encrypted_at_rest,
+                            }
+                          : null)
+                      }
+                    />
+                  </div>
+                )}
                 <div className="mt-4 max-w-md rounded-2xl border border-ivory/10 bg-void/40 px-4 py-3 backdrop-blur-sm">
                   <p className="text-[10px] tracking-[0.2em] text-gold uppercase">Incident location</p>
                   {typeof selected.lat === 'number' && typeof selected.lng === 'number' ? (

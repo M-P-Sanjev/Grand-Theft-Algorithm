@@ -74,3 +74,58 @@ class LocationUpdateBody(BaseModel):
     lng: float
     accuracy: Optional[float] = None
     live: bool = False
+
+
+class GuardianActivateBody(BaseModel):
+    token: str
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    location: Optional[str] = None
+    stealth: bool = False
+    recording: bool = True
+    name: Optional[str] = None
+    phone: Optional[str] = None
+
+
+class GuardianTranscriptBody(BaseModel):
+    token: str
+    text: str
+    final: bool = False
+    t_sec: Optional[float] = None
+    source: str = 'browser'
+
+
+class GuardianEvidenceBody(BaseModel):
+    token: str
+    filename: str = 'guardian-audio.webm'
+    content_b64: str
+    encrypted: bool = False
+    confirm_upload: bool = True
+    kind: str = 'audio'
+    duration_sec: Optional[float] = None
+
+
+class GuardianAudioChunkBody(BaseModel):
+    token: str
+    content_b64: str
+    seq: int = 0
+    mime: str = 'audio/webm'
+    t_sec: Optional[float] = None
+    force_stt: bool = False
+    stt: str = 'pending'
+
+
+class GuardianEvidenceFinalizeBody(BaseModel):
+    token: str
+    content_b64: Optional[str] = None
+    filename: str = 'guardian-audio.webm'
+    duration_sec: Optional[float] = None
+    confirm_upload: bool = True
+    live_snapshot: bool = False
+
+
+class GuardianContactNotifyBody(BaseModel):
+    token: str
+    contact_name: Optional[str] = None
+    contact_phone: Optional[str] = None
+    message: Optional[str] = None
