@@ -113,8 +113,8 @@ type CaseRow = {
     recording?: boolean
     stealth?: boolean
     activated_at?: string
-    transcript?: { text?: string; at?: string; t_sec?: number }[]
-    transcript_tail?: { text?: string; at?: string; t_sec?: number }[]
+    transcript?: { text?: string; at?: string; t_sec?: number; final?: boolean }[]
+    transcript_tail?: { text?: string; at?: string; t_sec?: number; final?: boolean }[]
     detected_events?: {
       kind?: string
       label?: string
@@ -225,22 +225,33 @@ function timeLabel(iso?: string) {
 }
 
 type GuardianState = NonNullable<CaseRow['guardian']>
-type TranscriptLine = { text?: string; at?: string }
+type TranscriptLine = { text?: string; at?: string; t_sec?: number; final?: boolean }
 
 function transcriptKey(line: TranscriptLine) {
-  return `${line.at || ''}|${(line.text || '').trim()}`
+  return `${(line.text || '').trim().toLowerCase()}|${line.final === false ? 'p' : 'f'}`
 }
 
 function unionTranscript(a: TranscriptLine[] = [], b: TranscriptLine[] = [], cap = 80) {
-  const seen = new Set<string>()
   const out: TranscriptLine[] = []
   for (const line of [...a, ...b]) {
-    const text = (line.text || '').trim()
+    const text = (line.text || '').trim().replace(/\s+/g, ' ')
     if (!text) continue
-    const key = transcriptKey(line)
-    if (seen.has(key)) continue
-    seen.add(key)
-    out.push({ text, at: line.at })
+    const next: TranscriptLine = {
+      text,
+      at: line.at,
+      t_sec: line.t_sec,
+      final: line.final !== false,
+    }
+    const last = out[out.length - 1]
+    if (last && last.final === false) {
+      // Replace growing partial slot
+      out[out.length - 1] = { ...next, at: last.at || next.at }
+      continue
+    }
+    if (last && (last.text || '').toLowerCase() === text.toLowerCase() && last.final !== false) {
+      continue
+    }
+    out.push(next)
   }
   return out.slice(-cap)
 }
@@ -295,13 +306,28 @@ function appendTranscriptChunk(
   text: string,
   at?: string,
   t_sec?: number,
+  final = true,
 ): GuardianState {
-  const line = {
-    text: text.trim(),
+  const cleaned = text.trim().replace(/\s+/g, ' ')
+  const line: TranscriptLine = {
+    text: cleaned,
     at: at || new Date().toISOString(),
     t_sec,
+    final,
   }
-  const transcript = unionTranscript(guardian?.transcript || guardian?.transcript_tail || [], [line])
+  const prev = guardian?.transcript || guardian?.transcript_tail || []
+  const last = prev[prev.length - 1]
+  let transcript: TranscriptLine[]
+  if (last && last.final === false) {
+    // Replace live partial with newer partial or finalized text
+    transcript = [...prev.slice(0, -1), { ...line, at: last.at || line.at }]
+  } else if (last && (last.text || '').toLowerCase() === cleaned.toLowerCase() && final) {
+    transcript = prev
+  } else {
+    transcript = [...prev, line]
+  }
+  transcript = transcript.slice(-80)
+  console.log('[transcript] Admin UI updated', { final, text: cleaned, lines: transcript.length })
   return {
     ...guardian,
     active: true,
@@ -468,12 +494,14 @@ export default function AdminPage() {
               typeof (data as { t_sec?: number }).t_sec === 'number'
                 ? (data as { t_sec?: number }).t_sec
                 : undefined
+            const isFinal = (data as { final?: boolean }).final !== false
+            console.log('[transcript] Admin received transcript (SSE)', { text, final: isFinal })
             const fromEvent = data.guardian as CaseRow['guardian'] | undefined
             setCases((prev) =>
               prev.map((c) => {
                 if (c.id !== data.case_id) return c
                 const withChunk = text
-                  ? appendTranscriptChunk(c.guardian, text, at, t_sec)
+                  ? appendTranscriptChunk(c.guardian, text, at, t_sec, isFinal)
                   : c.guardian
                 return {
                   ...c,
@@ -484,7 +512,7 @@ export default function AdminPage() {
             setSelected((cur) => {
               if (!cur || cur.id !== data.case_id) return cur
               const withChunk = text
-                ? appendTranscriptChunk(cur.guardian, text, at, t_sec)
+                ? appendTranscriptChunk(cur.guardian, text, at, t_sec, isFinal)
                 : cur.guardian
               return {
                 ...cur,
@@ -600,12 +628,14 @@ export default function AdminPage() {
         const text = String(ev.text || '')
         const at = typeof ev.at === 'string' ? (ev.at as string) : undefined
         const t_sec = typeof ev.t_sec === 'number' ? (ev.t_sec as number) : undefined
+        const isFinal = ev.final !== false
+        console.log('[transcript] Admin received transcript (WS)', { text, final: isFinal })
         const fromEvent = ev.guardian as CaseRow['guardian'] | undefined
         setCases((prev) =>
           prev.map((c) => {
             if (c.id !== ev.case_id) return c
             const withChunk = text
-              ? appendTranscriptChunk(c.guardian, text, at, t_sec)
+              ? appendTranscriptChunk(c.guardian, text, at, t_sec, isFinal)
               : c.guardian
             return {
               ...c,
@@ -618,7 +648,7 @@ export default function AdminPage() {
         setSelected((cur) => {
           if (!cur || cur.id !== ev.case_id) return cur
           const withChunk = text
-            ? appendTranscriptChunk(cur.guardian, text, at, t_sec)
+            ? appendTranscriptChunk(cur.guardian, text, at, t_sec, isFinal)
             : cur.guardian
           return {
             ...cur,

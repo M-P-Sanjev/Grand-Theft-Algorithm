@@ -649,6 +649,12 @@ async def guardian_transcript(case_id: str, body: GuardianTranscriptBody):
         raise HTTPException(status_code=404, detail='Case not found')
     from backend.orchestration.crisis.guardian import apply_transcript_chunk
 
+    logging.getLogger('backend.sos_app').info(
+        '[transcript] API received case=%s final=%s text=%r',
+        case_id,
+        body.final,
+        (body.text or '')[:120],
+    )
     updated = apply_transcript_chunk(
         case_id,
         body.text,
@@ -682,8 +688,9 @@ async def guardian_audio_chunk(case_id: str, body: GuardianAudioChunkBody):
 
     append_audio_chunk(case_id, body.seq, raw)
     transcript = ''
-    force = body.force_stt or body.stt in ('browser_failed', 'pending', 'unsupported')
-    if force and len(raw) > 800:
+    # Browser Web Speech is the live path — only force Gemini when client asks
+    force = bool(body.force_stt) or (body.stt or '') in ('browser_failed', 'unsupported')
+    if force and len(raw) > 4000:
         from backend.orchestration.crisis.stt_gemini import transcribe_audio_bytes
         from backend.orchestration.crisis.guardian import apply_transcript_chunk
 

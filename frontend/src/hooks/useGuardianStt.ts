@@ -18,7 +18,12 @@ type Opts = {
   enabled?: boolean
   onLine: (line: TranscriptLine) => void
   onListenState?: (s: GuardianListenState) => void
-  onAudioStatus?: (s: { recording: boolean; chunks: number; lastUploadOk: boolean; error?: string }) => void
+  onAudioStatus?: (s: {
+    recording: boolean
+    chunks: number
+    lastUploadOk: boolean
+    error?: string
+  }) => void
 }
 
 async function blobToB64(blob: Blob): Promise<string> {
@@ -33,9 +38,8 @@ async function blobToB64(blob: Blob): Promise<string> {
 }
 
 /**
- * Evidence-first MediaRecorder + Chrome Web Speech.
- * Never tears down the recorder when STT errors (that was wiping admin audio).
- * Pushes live snapshots every ~8s so admin can play without waiting for Save.
+ * Continuous Web Speech streaming + MediaRecorder evidence.
+ * Emits partials live; each final utterance is a new segment (not the full session dump).
  */
 export function useGuardianStt({
   caseId,
@@ -51,7 +55,8 @@ export function useGuardianStt({
   const onLineRef = useRef(onLine)
   const onStateRef = useRef(onListenState)
   const onAudioRef = useRef(onAudioStatus)
-  const lastPostedRef = useRef('')
+  const lastEmittedRef = useRef('')
+  const lastFinalRef = useRef('')
   const browserOkRef = useRef(false)
   const lastBrowserAtRef = useRef(0)
   const seqRef = useRef(0)
@@ -85,11 +90,24 @@ export function useGuardianStt({
   }, [])
 
   const emitLine = useCallback((text: string, final: boolean, source: string) => {
-    const cleaned = text.trim()
+    const cleaned = text.trim().replace(/\s+/g, ' ')
     if (!cleaned) return
-    if (!final && cleaned.length < 3) return
-    if (cleaned === lastPostedRef.current) return
-    lastPostedRef.current = cleaned
+    if (!final && cleaned.length < 2) return
+    const prev = lastEmittedRef.current
+    if (!final && cleaned === prev) return
+    if (final && cleaned === lastFinalRef.current) return
+    // Ignore shorter echo of what we already sent
+    if (prev && prev.toLowerCase().startsWith(cleaned.toLowerCase()) && prev.length > cleaned.length) {
+      return
+    }
+    lastEmittedRef.current = cleaned
+    if (final) lastFinalRef.current = cleaned
+    console.log(
+      final
+        ? '[transcript] Partial→final / final transcript generated'
+        : '[transcript] Partial transcript generated',
+      cleaned,
+    )
     onLineRef.current({
       text: cleaned,
       t_sec: secondsRef.current,
@@ -153,11 +171,10 @@ export function useGuardianStt({
       abort?: () => void
     } | null = null
     let debounce: ReturnType<typeof setTimeout> | null = null
-    let pending = ''
-    let finalsAccum = ''
     let restartTimer: ReturnType<typeof setTimeout> | null = null
     let speechTimer: ReturnType<typeof setTimeout> | null = null
     let snapshotTimer: ReturnType<typeof setInterval> | null = null
+    const startedAt = Date.now()
 
     type SpeechRecEvent = {
       resultIndex: number
@@ -170,21 +187,10 @@ export function useGuardianStt({
     }
     const Ctor = w.SpeechRecognition || w.webkitSpeechRecognition
 
-    const flushPending = (final: boolean) => {
-      if (debounce) {
-        clearTimeout(debounce)
-        debounce = null
-      }
-      if (pending.trim()) {
-        browserOkRef.current = true
-        lastBrowserAtRef.current = Date.now()
-        emitLine(pending, final, 'browser')
-      }
-    }
-
     const uploadChunk = async (blob: Blob, forceStt: boolean) => {
       if (dead || !blob.size) return
       const seq = seqRef.current++
+      console.log('[transcript] Audio chunk sent', { seq, bytes: blob.size, forceStt })
       try {
         const content_b64 = await blobToB64(blob)
         const res = await fetch(`${API_BASE}/guardian/${caseId}/audio-chunk`, {
@@ -197,7 +203,11 @@ export function useGuardianStt({
             mime: blob.type || 'audio/webm',
             t_sec: secondsRef.current,
             force_stt: forceStt,
-            stt: forceStt ? 'browser_failed' : browserOkRef.current ? 'browser_ok' : 'pending',
+            stt: forceStt
+              ? 'browser_failed'
+              : browserOkRef.current
+                ? 'browser_ok'
+                : 'pending',
           }),
         })
         emitAudioStatus({ lastUploadOk: res.ok, error: res.ok ? undefined : `Chunk ${res.status}` })
@@ -206,6 +216,7 @@ export function useGuardianStt({
         const text = typeof data.transcript === 'string' ? data.transcript.trim() : ''
         if (text && forceStt) {
           setState('gemini')
+          console.log('[transcript] Speech recognition received chunk (gemini)', text)
           emitLine(text, true, 'gemini')
         }
       } catch {
@@ -217,13 +228,18 @@ export function useGuardianStt({
       if (dead || mediaRef.current) return
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: true, noiseSuppression: true },
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: false,
+            autoGainControl: true,
+          },
         })
         if (dead) {
           stream.getTracks().forEach((t) => t.stop())
           return
         }
         streamRef.current = stream
+        console.log('[transcript] Microphone started')
         const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
           ? 'audio/webm;codecs=opus'
           : MediaRecorder.isTypeSupported('audio/webm')
@@ -234,9 +250,13 @@ export function useGuardianStt({
         rec.ondataavailable = (e) => {
           if (!e.data.size) return
           allChunksRef.current.push(e.data)
-          emitAudioStatus({ lastUploadOk: true })
+          emitAudioStatus()
+          const silentMs = Date.now() - lastBrowserAtRef.current
+          const warmedUp = Date.now() - startedAt > 8000
           const needGemini =
-            !Ctor || !browserOkRef.current || Date.now() - lastBrowserAtRef.current > 10000
+            warmedUp &&
+            e.data.size > 4000 &&
+            (!Ctor || !browserOkRef.current || silentMs > 12000)
           void uploadChunk(e.data, needGemini)
         }
         rec.onerror = () => {
@@ -279,32 +299,53 @@ export function useGuardianStt({
         setState('listening')
         browserOkRef.current = true
         lastBrowserAtRef.current = Date.now()
+        console.log('[transcript] Speech recognition received chunk')
+
         let interim = ''
-        let hasFinal = false
+        const newFinals: string[] = []
         for (let i = ev.resultIndex; i < ev.results.length; i++) {
           const piece = ev.results[i]
-          const t = piece[0]?.transcript || ''
-          if (piece.isFinal) {
-            finalsAccum += `${t} `
-            hasFinal = true
-          } else interim += t
+          const t = (piece[0]?.transcript || '').trim()
+          if (!t) continue
+          if (piece.isFinal) newFinals.push(t)
+          else interim += `${t} `
         }
-        pending = `${finalsAccum}${interim}`.trim()
-        if (debounce) clearTimeout(debounce)
-        if (hasFinal) flushPending(true)
-        else debounce = setTimeout(() => flushPending(false), 400)
+
+        // Emit ONLY new final segments — never the whole session history
+        if (newFinals.length) {
+          if (debounce) {
+            clearTimeout(debounce)
+            debounce = null
+          }
+          emitLine(newFinals.join(' '), true, 'browser')
+        }
+        // Stream partials immediately (debounced lightly)
+        if (interim.trim()) {
+          if (debounce) clearTimeout(debounce)
+          debounce = setTimeout(() => emitLine(interim.trim(), false, 'browser'), 200)
+        }
       }
 
       rec.onerror = (ev) => {
         if (dead) return
         const err = ev.error || ''
-        if (err === 'no-speech' || err === 'aborted') return
+        // Chrome fires no-speech often — keep listening
+        if (err === 'no-speech' || err === 'aborted') {
+          if (restartTimer) clearTimeout(restartTimer)
+          restartTimer = setTimeout(() => {
+            if (!dead) startSpeech()
+          }, 300)
+          return
+        }
+        if (err === 'audio-capture' || err === 'not-allowed') {
+          setState('error')
+          return
+        }
         setState('error')
-        // Do NOT stop MediaRecorder — evidence must keep flowing to admin
         if (restartTimer) clearTimeout(restartTimer)
         restartTimer = setTimeout(() => {
           if (!dead) startSpeech()
-        }, 900)
+        }, 700)
       }
 
       rec.onend = () => {
@@ -317,28 +358,28 @@ export function useGuardianStt({
           } catch {
             startSpeech()
           }
-        }, 250)
+        }, 200)
       }
 
       try {
         rec.start()
         setState('listening')
+        console.log('[transcript] Speech recognition continuous listening started')
       } catch {
         setState('error')
         restartTimer = setTimeout(() => {
           if (!dead) startSpeech()
-        }, 800)
+        }, 600)
       }
     }
 
-    // Evidence recorder FIRST, then STT — admin audio is non-negotiable
     setState('starting')
-    void startRecorder().then(() => {
-      if (dead) return
-      speechTimer = setTimeout(() => {
-        if (!dead) startSpeech()
-      }, 400)
-    })
+    lastBrowserAtRef.current = Date.now()
+    // Start STT immediately alongside recorder so live captions don't wait
+    void startRecorder()
+    speechTimer = setTimeout(() => {
+      if (!dead) startSpeech()
+    }, 100)
 
     snapshotTimer = setInterval(() => {
       if (!dead) void pushLiveSnapshot()
@@ -389,6 +430,5 @@ export function useGuardianStt({
     getRecordingBlob,
     stopRecording,
     pushLiveSnapshot,
-    lastPostedRef,
   }
 }

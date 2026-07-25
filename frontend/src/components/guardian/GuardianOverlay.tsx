@@ -8,7 +8,7 @@ import { useGuardianStt, type TranscriptLine } from '@/hooks/useGuardianStt'
 import { StealthShell, type StealthDisguise } from '@/components/guardian/StealthShell'
 
 type Beat = { t: string; title: string; detail?: string }
-type CapLine = { text: string; t_sec: number; at?: string }
+type CapLine = { text: string; t_sec: number; at?: string; final?: boolean }
 
 function fmt(sec: number) {
   const m = Math.floor(sec / 60)
@@ -85,19 +85,50 @@ export function GuardianOverlay({
 
   const postTranscript = useCallback(
     async (text: string, final = false, t_sec?: number, source = 'browser') => {
-      const cleaned = text.trim()
+      const cleaned = text.trim().replace(/\s+/g, ' ')
       if (!cleaned) return
-      if (!final && cleaned.length < 3) return
-      const key = `${cleaned}|${Math.floor(t_sec ?? seconds)}`
-      if (postedKeysRef.current.has(key) && cleaned === lastPostedRef.current) return
-      lastPostedRef.current = cleaned
+      if (!final && cleaned.length < 2) return
+      const sec = typeof t_sec === 'number' ? t_sec : seconds
+
+      // Local live lines: replace growing partial; append each final utterance
       setTranscript(cleaned)
       setLines((prev) => {
-        const next = [...prev, { text: cleaned, t_sec: t_sec ?? seconds }]
-        return next.slice(-40)
+        const last = prev[prev.length - 1]
+        const lastText = (last?.text || '').trim().toLowerCase()
+        const nextText = cleaned.toLowerCase()
+        if (last && lastText === nextText) {
+          return prev.map((l, i) =>
+            i === prev.length - 1 ? { ...l, text: cleaned, t_sec: sec, final: final || l.final } : l,
+          )
+        }
+        if (last && !last.final && (!final || nextText.startsWith(lastText) || lastText.startsWith(nextText))) {
+          const copy = [...prev]
+          copy[copy.length - 1] = { text: cleaned, t_sec: sec, final: !!final }
+          return copy.slice(-40)
+        }
+        if (final) {
+          return [...prev, { text: cleaned, t_sec: sec, final: true }].slice(-40)
+        }
+        return [...prev, { text: cleaned, t_sec: sec, final: false }].slice(-40)
       })
+
+      // Dedupe identical finals already POSTed
+      if (final) {
+        const key = cleaned.toLowerCase()
+        if (postedKeysRef.current.has(key)) return
+        postedKeysRef.current.add(key)
+        if (postedKeysRef.current.size > 200) {
+          postedKeysRef.current = new Set([...postedKeysRef.current].slice(-100))
+        }
+      } else if (cleaned === lastPostedRef.current) {
+        return
+      }
+      lastPostedRef.current = cleaned
+
       setPostError('')
-      pushBeat('Speech Detected', `"${cleaned.slice(0, 80)}"`)
+      if (final) pushBeat('Speech Detected', `"${cleaned.slice(0, 80)}"`)
+
+      console.log('[transcript] Transcript emitted to backend', { final, text: cleaned })
       try {
         const res = await fetch(`${API_BASE}/guardian/${caseId}/transcript`, {
           method: 'POST',
@@ -106,11 +137,12 @@ export function GuardianOverlay({
             token,
             text: cleaned,
             final,
-            t_sec: t_sec ?? seconds,
+            t_sec: sec,
             source,
           }),
         })
         if (!res.ok) {
+          if (final) postedKeysRef.current.delete(cleaned.toLowerCase())
           const data = await res.json().catch(() => ({}))
           const detail =
             typeof data.detail === 'string'
@@ -121,7 +153,6 @@ export function GuardianOverlay({
           setPostError(detail)
           return
         }
-        postedKeysRef.current.add(key)
         setTranscriptLive(true)
         if (livePulseRef.current) clearTimeout(livePulseRef.current)
         livePulseRef.current = setTimeout(() => setTranscriptLive(false), 3000)
@@ -131,6 +162,7 @@ export function GuardianOverlay({
         }
         if (data.guardian?.live_summary) setLiveSummary(String(data.guardian.live_summary))
       } catch {
+        if (final) postedKeysRef.current.delete(cleaned.toLowerCase())
         setPostError('Could not reach server — check backend is running')
       }
     },

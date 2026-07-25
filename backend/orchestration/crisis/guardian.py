@@ -21,6 +21,11 @@ logger = logging.getLogger(__name__)
 _SUMMARY_POLISH_AT: dict[str, float] = {}
 
 
+def _fmt_ts(t_sec: float | None) -> str:
+    s = max(0, int(t_sec or 0))
+    return f'{s // 60:02d}:{s % 60:02d}'
+
+
 def apply_transcript_chunk(
     case_id: str,
     text: str,
@@ -29,12 +34,12 @@ def apply_transcript_chunk(
     t_sec: float | None = None,
     source: str = 'browser',
 ) -> dict[str, Any] | None:
-    """Append transcript, reclassify risk from full text, publish live events."""
+    """Append/update live transcript, reclassify risk on finals, publish live events."""
     case = get_case(case_id)
     if not case:
         return None
 
-    chunk = (text or '').strip()
+    chunk = ' '.join((text or '').split())
     if not chunk:
         return case
 
@@ -45,11 +50,32 @@ def apply_transcript_chunk(
     line = {
         'text': chunk,
         'at': now,
-        'final': final,
+        'final': bool(final),
         't_sec': t_sec,
         'source': source,
+        'timestamp': _fmt_ts(t_sec),
     }
-    transcript.append(line)
+
+    last = transcript[-1] if transcript else None
+    last_text = ' '.join(str((last or {}).get('text') or '').split())
+    last_final = bool((last or {}).get('final', True)) if last else True
+
+    if last and not last_final:
+        # Growing partial → replace in place; final → finalize that slot
+        if not final or chunk.casefold().startswith(last_text.casefold()) or last_text.casefold().startswith(
+            chunk.casefold()
+        ):
+            transcript[-1] = line
+        elif final and last_text.casefold() == chunk.casefold():
+            transcript[-1] = line
+        else:
+            transcript.append(line)
+    elif last and last_final and last_text.casefold() == chunk.casefold():
+        # Exact duplicate of last final — ignore
+        return case
+    else:
+        transcript.append(line)
+
     guardian['transcript'] = transcript[-80:]
     guardian['active'] = True
     guardian['recording'] = True
@@ -57,6 +83,40 @@ def apply_transcript_chunk(
     if not guardian.get('transcript_started'):
         guardian['transcript_started'] = True
         append_timeline(case, 'Transcript started', detail='Live captions active')
+
+    case['guardian'] = guardian
+
+    # --- Live partials: persist + WS only (no risk/emotion pass) ---
+    if not final:
+        logger.info(
+            '[transcript] backend received partial case=%s t=%s text=%r',
+            case_id,
+            t_sec,
+            chunk[:120],
+        )
+        updated = update_case(case_id, guardian=guardian)
+        case = updated or case
+        g = case.get('guardian') or {}
+        publish(
+            {
+                'type': 'transcript_chunk',
+                'case_id': case_id,
+                'text': chunk,
+                'at': now,
+                't_sec': t_sec,
+                'final': False,
+                'source': source,
+                'timestamp': line['timestamp'],
+                'guardian': {
+                    'active': True,
+                    'recording': True,
+                    'transcript_tail': (g.get('transcript') or [])[-12:],
+                    'transcript_count': len(g.get('transcript') or []),
+                },
+            }
+        )
+        logger.info('[transcript] WebSocket broadcast sent (partial) case=%s', case_id)
+        return case
 
     # Keyword / threat detection on this chunk
     new_events = detect_keywords(chunk, t_sec=t_sec, at=now)
@@ -80,7 +140,7 @@ def apply_transcript_chunk(
     guardian['detected_events'] = events[-40:]
     case['guardian'] = guardian
 
-    # Accumulate notes for classifiers
+    # Accumulate notes for classifiers (finals only)
     prior = case.get('notes') or ''
     if 'Guardian Mode activated' in prior and len(prior) < 80:
         combined = f'{prior}\n{chunk}'.strip()
@@ -102,6 +162,12 @@ def apply_transcript_chunk(
     case['conversation'] = conversation[-40:]
 
     append_timeline(case, 'Transcript detected', detail=chunk[:160])
+    logger.info(
+        '[transcript] backend received final case=%s t=%s text=%r',
+        case_id,
+        t_sec,
+        chunk[:120],
+    )
 
     emotion: dict[str, Any] = {}
     violence: dict[str, Any] = {}
@@ -291,6 +357,7 @@ def apply_transcript_chunk(
             't_sec': t_sec,
             'final': final,
             'source': source,
+            'timestamp': _fmt_ts(t_sec),
             'risk_score': risk_index,
             'risk_tier': severity,
             'guardian': {
@@ -304,6 +371,7 @@ def apply_transcript_chunk(
             },
         }
     )
+    logger.info('[transcript] WebSocket broadcast sent (final) case=%s', case_id)
     publish(
         {
             'type': 'guardian_summary',
